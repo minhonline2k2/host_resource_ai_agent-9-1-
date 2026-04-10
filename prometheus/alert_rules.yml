@@ -1,0 +1,100 @@
+# Alert Rules for Host Resource AI Agent
+# Giám sát CPU, RAM, DISK trên Server 2 (172.16.50.147)
+
+groups:
+  - name: host_cpu_alerts
+    rules:
+      # CPU usage > 90% trong 5 phút
+      - alert: HostCPUHigh
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU usage cao trên {{ $labels.instance }}: {{ $value | printf \"%.1f\" }}%"
+          description: "CPU usage đã vượt 90% trong 5 phút liên tục"
+
+      # Load average cao (> số CPU cores * 2)
+      - alert: HostLoadHigh
+        expr: node_load5 > 8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Load average cao trên {{ $labels.instance }}: {{ $value | printf \"%.1f\" }}"
+
+      # IO Wait cao > 20%
+      - alert: HostIOWaitHigh
+        expr: avg by(instance) (rate(node_cpu_seconds_total{mode="iowait"}[5m])) * 100 > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IO Wait cao trên {{ $labels.instance }}: {{ $value | printf \"%.1f\" }}%"
+
+  - name: host_memory_alerts
+    rules:
+      # Memory usage > 90%
+      - alert: HostMemoryHigh
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory usage cao trên {{ $labels.instance }}: {{ $value | printf \"%.1f\" }}%"
+
+      # Available memory < 256MB
+      - alert: HostAvailableMemoryLow
+        expr: node_memory_MemAvailable_bytes < 268435456
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Available memory rất thấp trên {{ $labels.instance }}: {{ $value | humanize }}"
+
+      # Swap usage > 50%
+      - alert: HostSwapHigh
+        expr: (node_memory_SwapTotal_bytes > 0) and ((node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes) / node_memory_SwapTotal_bytes * 100 > 50)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Swap usage cao trên {{ $labels.instance }}"
+
+  - name: host_disk_alerts
+    rules:
+      # Disk usage > 85%
+      - alert: HostDiskUsageHigh
+        expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|devtmpfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|devtmpfs"}) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk usage cao trên {{ $labels.instance }} mount={{ $labels.mountpoint }}: {{ $value | printf \"%.1f\" }}%"
+
+      # Disk usage > 95% (critical)
+      - alert: HostDiskUsageCritical
+        expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|devtmpfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|devtmpfs"}) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CRITICAL: Disk gần đầy trên {{ $labels.instance }} mount={{ $labels.mountpoint }}: {{ $value | printf \"%.1f\" }}%"
+
+      # Inode usage > 85%
+      - alert: HostDiskInodeHigh
+        expr: (1 - node_filesystem_files_free{fstype!~"tmpfs|overlay"} / node_filesystem_files{fstype!~"tmpfs|overlay"}) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inode usage cao trên {{ $labels.instance }}: {{ $value | printf \"%.1f\" }}%"
+
+      # Disk I/O utilization > 90%
+      - alert: HostDiskIOHigh
+        expr: rate(node_disk_io_time_seconds_total[5m]) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk I/O utilization cao trên {{ $labels.instance }}: {{ $value | printf \"%.1f\" }}%"
