@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.core.redis_client import RedisService
 from app.repositories.incident_repo import IncidentRepository
-from app.schemas.schemas import AlertManagerAlert, ALERT_RESOURCE_MAP, IncidentStatus
+from app.schemas.schemas import AlertManagerAlert, ALERT_RESOURCE_MAP, SUPERVISOR_ALERT_NAMES, IncidentStatus
 
 logger = get_logger(__name__)
 
@@ -76,6 +76,22 @@ class AlertIntakeService:
         entity_name = labels.get("entity", instance.split(":")[0] if ":" in instance else instance)
         cluster_name = labels.get("cluster", "")
         component_type = _detect_host_role(labels)
+
+        # Detect supervisor alerts → domain_type=SUPERVISOR
+        is_supervisor = (
+            alert_name in SUPERVISOR_ALERT_NAMES
+            or job_name.lower() in ("supervisor", "supervisord")
+            or labels.get("process_name", "") != ""
+        )
+        if is_supervisor:
+            domain_type = "SUPERVISOR"
+            resource_type = "PROCESS"
+            entity_name = labels.get("process_name", labels.get("name", entity_name))
+            service_name = labels.get("group_name", labels.get("group", service_name))
+            logger.info(f"[INTAKE] 🔧 Detected SUPERVISOR alert: process={entity_name}")
+        else:
+            domain_type = "HOST"
+
         alert_key = f"{alert_name}:{instance}:{resource_type}"
 
         norm_id = await self.repo.save_alert_normalized(
@@ -86,7 +102,7 @@ class AlertIntakeService:
             instance=instance,
             job_name=job_name,
             resource_type=resource_type,
-            domain_type="HOST",
+            domain_type=domain_type,
             component_type=component_type,
             service_name=service_name,
             entity_name=entity_name,
@@ -120,7 +136,7 @@ class AlertIntakeService:
             severity=severity,
             instance=instance,
             resource_type=resource_type,
-            domain_type="HOST",
+            domain_type=domain_type,
             component_type=component_type,
             service_name=service_name,
             entity_name=entity_name,

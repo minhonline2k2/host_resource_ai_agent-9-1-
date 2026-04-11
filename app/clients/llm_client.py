@@ -189,3 +189,127 @@ class LLMClient:
         except Exception as e:
             logger.error(f"[LLM] Validation error: {e}", exc_info=True)
             return None
+
+    async def analyze_supervisor_incident(self, prompt: str) -> tuple[Optional[dict], Optional[str]]:
+        """Send supervisor prompt to Gemini. Returns (parsed_dict, raw_text).
+        
+        Unlike analyze_incident which returns LLMRCAResponse,
+        this returns a raw dict matching the supervisor JSON schema.
+        """
+        url = GEMINI_URL.format(model=self.model)
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 8192,
+                "responseMimeType": "application/json",
+            },
+        }
+
+        logger.info(f"[LLM-SUP] Calling {self.model} for supervisor analysis")
+        logger.info(f"[LLM-SUP] Prompt length: {len(prompt)} chars")
+
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=30)) as client:
+                    resp = await client.post(url, params={"key": self.api_key}, json=payload)
+
+                logger.info(f"[LLM-SUP] Response status: {resp.status_code} (attempt {attempt})")
+
+                if resp.status_code in (429, 503):
+                    logger.warning(f"[LLM-SUP] Rate limited: {resp.status_code}")
+                    if attempt < self.max_retries:
+                        import asyncio
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    return None, f"LLM error {resp.status_code}: {resp.text[:500]}"
+
+                if resp.status_code != 200:
+                    error_text = resp.text[:1000]
+                    logger.error(f"[LLM-SUP] ❌ HTTP {resp.status_code}: {error_text}")
+                    return None, f"LLM HTTP {resp.status_code}: {error_text}"
+
+                data = resp.json()
+
+                if "error" in data:
+                    err_msg = data["error"].get("message", str(data["error"]))
+                    logger.error(f"[LLM-SUP] ❌ API error: {err_msg}")
+                    return None, f"LLM API error: {err_msg}"
+
+                raw_text = ""
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        raw_text = parts[0].get("text", "")
+
+                if not raw_text:
+                    logger.error(f"[LLM-SUP] ❌ Empty response")
+                    return None, f"Empty response. Full: {json.dumps(data)[:2000]}"
+
+                logger.info(f"[LLM-SUP] ✅ Got response: {len(raw_text)} chars")
+
+                # Parse as raw JSON dict
+                parsed = self._parse_supervisor_response(raw_text)
+                return parsed, raw_text
+
+            except httpx.TimeoutException as e:
+                logger.error(f"[LLM-SUP] ❌ Timeout: {e}")
+                if attempt >= self.max_retries:
+                    return None, f"Timeout: {e}"
+            except Exception as e:
+                logger.error(f"[LLM-SUP] ❌ Error: {e}", exc_info=True)
+                if attempt >= self.max_retries:
+                    return None, f"Error: {e}"
+
+        return None, "Max retries exceeded"
+
+    def _parse_supervisor_response(self, text: str) -> Optional[dict]:
+        """Parse supervisor LLM JSON response into a dict."""
+        try:
+            cleaned = text.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+
+            data = json.loads(cleaned)
+
+            # Ensure required fields exist with defaults
+            if "root_cause" not in data:
+                data["root_cause"] = {"category": "UNKNOWN", "summary_vi": "", "evidence": "", "confidence": 0.3}
+            if "severity" not in data:
+                data["severity"] = "MEDIUM"
+            if "immediate_action" not in data:
+                data["immediate_action"] = {"description_vi": "", "commands": [], "estimated_ttr_s": 0}
+            if "root_fix" not in data:
+                data["root_fix"] = {"description_vi": "", "steps_vi": [], "requires_deploy": False, "requires_restart": False}
+
+            # Normalize list fields
+            rc = data["root_cause"]
+            if isinstance(rc.get("confidence"), str):
+                try:
+                    rc["confidence"] = float(rc["confidence"])
+                except ValueError:
+                    rc["confidence"] = 0.5
+
+            ia = data["immediate_action"]
+            if isinstance(ia.get("commands"), str):
+                ia["commands"] = [ia["commands"]]
+            if ia.get("commands") is None:
+                ia["commands"] = []
+
+            logger.info(f"[LLM-SUP] ✅ Parsed OK: category={rc.get('category')}, "
+                        f"severity={data.get('severity')}, "
+                        f"commands={len(ia.get('commands', []))}")
+
+            return data
+
+        except json.JSONDecodeError as e:
+            logger.error(f"[LLM-SUP] JSON parse error: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"[LLM-SUP] Validation error: {e}", exc_info=True)
+            return None
+

@@ -98,3 +98,70 @@ groups:
           severity: warning
         annotations:
           summary: "Disk I/O utilization cao trên {{ $labels.instance }}: {{ $value | printf \"%.1f\" }}%"
+
+  # ═══════════════════════════════════════════════════════════════
+  # SUPERVISOR PROCESS ALERTS
+  # Metrics từ textfile collector (supervisor_metrics.sh → node_exporter)
+  # supervisor_process_state: 0=STOPPED 1=RUNNING 2=FATAL 3=BACKOFF
+  # ═══════════════════════════════════════════════════════════════
+  - name: supervisor_process_alerts
+    rules:
+      # Process không ở trạng thái RUNNING (state != 1)
+      - alert: SupervisorProcessDown
+        expr: supervisor_process_state != 1
+        for: 1m
+        labels:
+          severity: critical
+          process_name: "{{ $labels.name }}"
+          job: "supervisor"
+        annotations:
+          summary: "Supervisor process {{ $labels.name }} is DOWN on {{ $labels.instance }} (state={{ $value }})"
+          description: "Process {{ $labels.name }} không ở trạng thái RUNNING. State: 0=STOPPED, 2=FATAL, 3=BACKOFF, 6=EXITED"
+
+      # Process ở trạng thái FATAL (state = 2)
+      - alert: SupervisorProcessFatal
+        expr: supervisor_process_state == 2
+        for: 30s
+        labels:
+          severity: critical
+          process_name: "{{ $labels.name }}"
+          job: "supervisor"
+        annotations:
+          summary: "Supervisor process {{ $labels.name }} is FATAL on {{ $labels.instance }}"
+          description: "Process ở trạng thái FATAL — đã vượt quá số lần retry cho phép"
+
+      # Process exit code = 137 (OOM kill)
+      - alert: SupervisorProcessExited
+        expr: supervisor_process_exit_code == 137
+        for: 30s
+        labels:
+          severity: critical
+          process_name: "{{ $labels.name }}"
+          job: "supervisor"
+        annotations:
+          summary: "Supervisor process {{ $labels.name }} exited with code 137 (OOM) on {{ $labels.instance }}"
+          description: "Exit code 137 = SIGKILL, thường do OOM killer"
+
+      # Process ở trạng thái BACKOFF (state = 3) — đang crash loop
+      - alert: SupervisorProcessBackoff
+        expr: supervisor_process_state == 3
+        for: 30s
+        labels:
+          severity: warning
+          process_name: "{{ $labels.name }}"
+          job: "supervisor"
+        annotations:
+          summary: "Supervisor process {{ $labels.name }} is in BACKOFF on {{ $labels.instance }}"
+          description: "Process đang ở trạng thái BACKOFF — crash loop, sẽ thử restart"
+
+      # Process uptime rất ngắn (< 10s) — đang crash và restart liên tục
+      - alert: SupervisorProcessRestarting
+        expr: supervisor_process_state == 1 and supervisor_process_uptime_seconds < 10
+        for: 1m
+        labels:
+          severity: warning
+          process_name: "{{ $labels.name }}"
+          job: "supervisor"
+        annotations:
+          summary: "Supervisor process {{ $labels.name }} keeps restarting on {{ $labels.instance }} (uptime={{ $value }}s)"
+          description: "Process chạy được dưới 10 giây rồi lại restart — crash loop"

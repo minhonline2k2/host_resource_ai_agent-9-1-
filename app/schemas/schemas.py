@@ -33,10 +33,22 @@ class AlertManagerWebhook(BaseModel):
 
 # === Alert Mapping ===
 ALERT_RESOURCE_MAP: dict[str, str] = {
+    # Host resource alerts
     "HostCPUHigh": "CPU", "HostLoadHigh": "CPU", "HostIOWaitHigh": "CPU", "HostStealHigh": "CPU",
     "HostMemoryHigh": "RAM", "HostAvailableMemoryLow": "RAM", "HostSwapHigh": "RAM", "HostOOMRisk": "RAM",
     "HostDiskUsageHigh": "DISK", "HostDiskUsageCritical": "DISK", "HostDiskInodeHigh": "DISK",
     "HostDiskIOHigh": "DISK", "HostDiskLatencyHigh": "DISK",
+    # Supervisor alerts
+    "SupervisorProcessDown": "PROCESS", "SupervisorProcessFatal": "PROCESS",
+    "SupervisorProcessExited": "PROCESS", "SupervisorProcessBackoff": "PROCESS",
+    "SupervisorProcessRestarting": "PROCESS",
+}
+
+# Supervisor alert names (used for domain_type detection)
+SUPERVISOR_ALERT_NAMES = {
+    "SupervisorProcessDown", "SupervisorProcessFatal",
+    "SupervisorProcessExited", "SupervisorProcessBackoff",
+    "SupervisorProcessRestarting",
 }
 
 

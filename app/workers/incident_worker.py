@@ -81,6 +81,15 @@ async def process_incident(db: AsyncSession, redis_svc: RedisService, incident_i
         logger.error(f"[PIPELINE] Incident {incident_id} not found in DB")
         return
 
+    # === ROUTE: Supervisor vs Host Resource ===
+    if incident.domain_type == "SUPERVISOR":
+        logger.info(f"[PIPELINE] 🔧 Routing to SUPERVISOR pipeline: {incident_id}")
+        from app.workers.supervisor_worker import process_supervisor_incident
+        await process_supervisor_incident(db, redis_svc, incident_id)
+        return
+
+    logger.info(f"[PIPELINE] 🖥️ Routing to HOST RESOURCE pipeline: {incident_id}")
+
     instance = incident.instance
     host = instance.split(":")[0] if ":" in instance else instance
     resource_type = incident.resource_type or "UNKNOWN"
