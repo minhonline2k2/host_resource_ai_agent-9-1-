@@ -129,12 +129,21 @@ async def process_supervisor_incident(
     stderr_content = evidence_map.get("sup_stderr", "")
     stdout_content = evidence_map.get("sup_stdout", "")
     mem_free_mb = evidence_map.get("sup_mem_free", "0").strip()
+    mem_detail = evidence_map.get("sup_mem_detail", "")
     disk_pct = evidence_map.get("sup_disk_usage", "0%").strip()
+    disk_detail = evidence_map.get("sup_disk_detail", "")
     syslog_content = evidence_map.get("sup_syslog_oom", "")
     supervisord_log = evidence_map.get("sup_supervisord_log", "")
     dmesg_recent = evidence_map.get("sup_dmesg_recent", "")
     top_mem = evidence_map.get("sup_top_mem", "")
+    top_cpu = evidence_map.get("sup_top_cpu", "")
     recent_restarts = evidence_map.get("sup_recent_restarts", "")
+    proc_detail = evidence_map.get("sup_proc_detail", "")
+    proc_env = evidence_map.get("sup_proc_env", "")
+    restart_history = evidence_map.get("sup_restart_history", "")
+    network_info = evidence_map.get("sup_network", "")
+    journal_log = evidence_map.get("sup_journal", "")
+    uptime_load = evidence_map.get("sup_uptime_load", "")
 
     # Detect OOM and signal flags from syslog
     syslog_lower = syslog_content.lower()
@@ -247,6 +256,15 @@ async def process_supervisor_incident(
         supervisord_log=supervisord_log,
         dmesg_recent=dmesg_recent,
         top_mem=top_mem,
+        proc_detail=proc_detail,
+        proc_env=proc_env,
+        restart_history=restart_history,
+        top_cpu=top_cpu,
+        network_info=network_info,
+        journal_log=journal_log,
+        mem_detail=mem_detail,
+        disk_detail=disk_detail,
+        uptime_load=uptime_load,
     )
 
     # Add rule hints if matched

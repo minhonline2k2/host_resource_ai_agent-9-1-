@@ -98,6 +98,15 @@ def build_supervisor_evidence_pack(
     supervisord_log: str = "",
     dmesg_recent: str = "",
     top_mem: str = "",
+    proc_detail: str = "",
+    proc_env: str = "",
+    restart_history: str = "",
+    top_cpu: str = "",
+    network_info: str = "",
+    journal_log: str = "",
+    mem_detail: str = "",
+    disk_detail: str = "",
+    uptime_load: str = "",
 ) -> str:
     """Build the evidence pack string for supervisor LLM prompt."""
     parts = []
@@ -111,55 +120,119 @@ def build_supervisor_evidence_pack(
     parts.append(f"UPTIME_BEFORE_S:   {uptime_sec}")
     parts.append(f"RESTART_COUNT:     {retry_count}")
     parts.append(f"ALERT_TIME:        {alert_time}")
+    if uptime_load:
+        parts.append(f"SYSTEM_LOAD:       {uptime_load.strip()}")
 
+    # STDERR — thong tin quan trong nhat cho LLM
     parts.append("")
-    parts.append("## STDERR LOG (.err) — 80 dòng cuối")
+    parts.append("## STDERR LOG (.err) — 150 dong cuoi (QUAN TRONG NHAT)")
     parts.append("```")
-    parts.append(stderr_content if stderr_content.strip() else "(rỗng)")
+    parts.append(stderr_content[:8000] if stderr_content.strip() else "(rong)")
     parts.append("```")
 
+    # STDOUT — context truoc khi crash
     parts.append("")
-    parts.append("## STDOUT LOG (.out) — 40 dòng cuối")
+    parts.append("## STDOUT LOG (.out) — 80 dong cuoi")
     parts.append("```")
-    parts.append(stdout_content if stdout_content.strip() else "(rỗng)")
+    parts.append(stdout_content[:5000] if stdout_content.strip() else "(rong)")
     parts.append("```")
 
+    # Supervisor config
     parts.append("")
     parts.append(f"## SUPERVISOR CONFIG — [program:{process_name}]")
     parts.append("```ini")
-    parts.append(supervisor_conf if supervisor_conf.strip() else "(không tìm thấy)")
+    parts.append(supervisor_conf if supervisor_conf.strip() else "(khong tim thay)")
     parts.append("```")
 
+    # Trang thai he thong
     parts.append("")
-    parts.append("## TRẠNG THÁI HỆ THỐNG")
+    parts.append("## TRANG THAI HE THONG")
     parts.append(f"MEM_FREE_MB:      {mem_free_mb}")
     parts.append(f"DISK_USAGE_PCT:   {disk_pct}")
     parts.append(f"OOM_IN_SYSLOG:    {oom_flag}")
     parts.append(f"SIGNAL_IN_SYSLOG: {signal_flag}")
 
-    if supervisord_log.strip():
+    if mem_detail and mem_detail.strip():
         parts.append("")
-        parts.append("## SUPERVISORD LOG — 50 dòng cuối")
+        parts.append("## MEMORY DETAIL (free -m)")
         parts.append("```")
-        parts.append(supervisord_log[:3000])
+        parts.append(mem_detail.strip()[:1000])
         parts.append("```")
 
-    if dmesg_recent.strip():
+    if disk_detail and disk_detail.strip():
         parts.append("")
-        parts.append("## DMESG RECENT — 30 dòng cuối")
+        parts.append("## DISK DETAIL (df -h)")
         parts.append("```")
-        parts.append(dmesg_recent[:2000])
+        parts.append(disk_detail.strip()[:1500])
         parts.append("```")
 
-    if top_mem.strip():
+    # Process detail — PID, RSS, threads, FD
+    if proc_detail and proc_detail.strip() and "Process not running" not in proc_detail:
         parts.append("")
-        parts.append("## TOP PROCESSES BY MEMORY")
+        parts.append("## PROCESS RUNTIME INFO")
+        parts.append("```")
+        parts.append(proc_detail.strip()[:2000])
+        parts.append("```")
+
+    # Process environment (filtered — no secrets)
+    if proc_env and proc_env.strip() and "Process not running" not in proc_env:
+        parts.append("")
+        parts.append("## PROCESS ENVIRONMENT (filtered)")
+        parts.append("```")
+        parts.append(proc_env.strip()[:2000])
+        parts.append("```")
+
+    # Lich su restart
+    if restart_history and restart_history.strip():
+        parts.append("")
+        parts.append("## LICH SU RESTART (40 dong cuoi)")
+        parts.append("```")
+        parts.append(restart_history.strip()[:3000])
+        parts.append("```")
+    elif supervisord_log and supervisord_log.strip():
+        parts.append("")
+        parts.append("## SUPERVISORD LOG — 80 dong cuoi")
+        parts.append("```")
+        parts.append(supervisord_log[:4000])
+        parts.append("```")
+
+    if dmesg_recent and dmesg_recent.strip():
+        parts.append("")
+        parts.append("## DMESG RECENT — 40 dong cuoi")
+        parts.append("```")
+        parts.append(dmesg_recent[:3000])
+        parts.append("```")
+
+    if top_mem and top_mem.strip():
+        parts.append("")
+        parts.append("## TOP PROCESSES BY MEMORY (RSS)")
         parts.append("```")
         parts.append(top_mem[:2000])
         parts.append("```")
 
+    if top_cpu and top_cpu.strip():
+        parts.append("")
+        parts.append("## TOP PROCESSES BY CPU")
+        parts.append("```")
+        parts.append(top_cpu[:1500])
+        parts.append("```")
+
+    if network_info and network_info.strip():
+        parts.append("")
+        parts.append("## LISTENING PORTS (ss -tlnp)")
+        parts.append("```")
+        parts.append(network_info.strip()[:1500])
+        parts.append("```")
+
+    if journal_log and journal_log.strip():
+        parts.append("")
+        parts.append("## SYSTEMD JOURNAL")
+        parts.append("```")
+        parts.append(journal_log.strip()[:2000])
+        parts.append("```")
+
     parts.append("")
-    parts.append("## ==== HẾT DỮ LIỆU ==== ##")
+    parts.append("## ==== HET DU LIEU ==== ##")
 
     return "\n".join(parts)
 
