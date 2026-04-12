@@ -128,11 +128,52 @@ async def get_incident_detail(incident_id: str, db: AsyncSession = Depends(get_d
     llm_analysis = None
     if incident.ai_analysis_json:
         ai = incident.ai_analysis_json
-        llm_analysis = LLMAnalysis(
-            summary=ai.get("summary", incident.summary or ""),
-            root_causes=[RootCauseItem(**rc) for rc in ai.get("root_causes", [])],
-            confidence=ai.get("confidence", incident.llm_confidence or 0),
-        )
+
+        # Detect supervisor format vs host format
+        if "root_cause" in ai and isinstance(ai.get("root_cause"), dict):
+            # === SUPERVISOR FORMAT ===
+            rc_data = ai["root_cause"]
+            category = rc_data.get("category", "UNKNOWN")
+            summary_vi = rc_data.get("summary_vi", "")
+            evidence_str = rc_data.get("evidence", "")
+            confidence = rc_data.get("confidence", 0)
+            severity = ai.get("severity", "MEDIUM")
+            immediate = ai.get("immediate_action", {})
+            root_fix = ai.get("root_fix", {})
+            monitoring = ai.get("monitoring_vi", "")
+            escalate = ai.get("escalate", False)
+            escalate_reason = ai.get("escalate_reason_vi", "")
+
+            root_causes = [
+                RootCauseItem(
+                    name=f"[{category}] {summary_vi}",
+                    confidence=confidence,
+                    why=evidence_str,
+                )
+            ]
+
+            summary_parts = [f"[{category}] {summary_vi}"]
+            if immediate.get("description_vi"):
+                summary_parts.append(f"Hành động ngay: {immediate['description_vi']}")
+            if root_fix.get("description_vi"):
+                summary_parts.append(f"Sửa gốc: {root_fix['description_vi']}")
+            if monitoring:
+                summary_parts.append(f"Monitoring: {monitoring}")
+            if escalate:
+                summary_parts.append(f"⚠ Escalate: {escalate_reason}")
+
+            llm_analysis = LLMAnalysis(
+                summary="\n".join(summary_parts),
+                root_causes=root_causes,
+                confidence=confidence,
+            )
+        else:
+            # === HOST FORMAT ===
+            llm_analysis = LLMAnalysis(
+                summary=ai.get("summary", incident.summary or ""),
+                root_causes=[RootCauseItem(**rc) for rc in ai.get("root_causes", [])],
+                confidence=ai.get("confidence", incident.llm_confidence or 0),
+            )
     elif incident.root_cause:
         llm_analysis = LLMAnalysis(
             summary=incident.summary or incident.root_cause,
