@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -28,6 +29,9 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 async def lifespan(app: FastAPI):
     setup_logging("DEBUG" if settings.app_debug else "INFO")
 
+    # Track background tasks so they can be awaited on shutdown
+    app.state.background_tasks = set()
+
     # Auto-create all tables on startup
     engine = get_engine()
     async with engine.begin() as conn:
@@ -35,6 +39,12 @@ async def lifespan(app: FastAPI):
     logger.info("Database tables created/verified")
 
     yield
+
+    # Wait for background tasks to complete on shutdown
+    if app.state.background_tasks:
+        logger.info(f"Waiting for {len(app.state.background_tasks)} background tasks...")
+        await asyncio.gather(*app.state.background_tasks, return_exceptions=True)
+
     await engine.dispose()
 
 

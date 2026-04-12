@@ -58,4 +58,17 @@ async def main():
     await run_worker()
 
 
-asyncio.run(main())
+import signal
+
+def _handle_signal(sig, frame):
+    print(f"\n[WORKER] Received signal {sig}, shutting down gracefully...")
+    raise KeyboardInterrupt
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT, _handle_signal)
+
+try:
+    asyncio.run(main())
+except KeyboardInterrupt:
+    print("[WORKER] Shutdown complete.")
+    sys.exit(0)

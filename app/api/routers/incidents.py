@@ -9,6 +9,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import Request as StarletteRequest
 
 from app.core.database import get_db
 from app.core.redis_client import get_redis, RedisService
@@ -241,6 +242,7 @@ async def get_incident_detail(incident_id: str, db: AsyncSession = Depends(get_d
 # === Approvals ===
 @router.post("/approvals")
 async def create_approval(
+    request: Request,
     req: ApprovalRequest,
     db: AsyncSession = Depends(get_db),
 ):
@@ -288,9 +290,13 @@ async def create_approval(
 
         await db.commit()
 
-        # Execute in background
+        # Execute in background with proper task tracking
         host = incident.instance.split(":")[0] if ":" in incident.instance else incident.instance
-        asyncio.create_task(_handle_execution(incident.id, req.action_proposal_id, host, redis_svc))
+        task = asyncio.create_task(_handle_execution(incident.id, req.action_proposal_id, host, redis_svc))
+        bg_tasks = getattr(request.app.state, "background_tasks", None)
+        if bg_tasks is not None:
+            bg_tasks.add(task)
+            task.add_done_callback(bg_tasks.discard)
 
         await redis_svc.publish_event("action_approved", {
             "incident_id": incident.id, "option_id": req.action_proposal_id,
@@ -555,6 +561,7 @@ async def event_stream(request: Request):
         await pubsub.subscribe("agent:events")
 
         try:
+            heartbeat_counter = 0
             while True:
                 if await request.is_disconnected():
                     break
@@ -564,8 +571,12 @@ async def event_stream(request: Request):
                     data = message["data"]
                     yield f"data: {data}\n\n"
 
-                # Heartbeat every 15s
-                yield f": heartbeat\n\n"
+                # Heartbeat every ~15s (15 iterations * 1s sleep)
+                heartbeat_counter += 1
+                if heartbeat_counter >= 15:
+                    yield f": heartbeat\n\n"
+                    heartbeat_counter = 0
+
                 await asyncio.sleep(1)
         finally:
             await pubsub.unsubscribe("agent:events")
