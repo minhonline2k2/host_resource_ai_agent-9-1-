@@ -146,6 +146,9 @@ async def process_supervisor_incident(
     uptime_load = evidence_map.get("sup_uptime_load", "")
     referenced_paths = evidence_map.get("sup_referenced_paths", "")
     workdir_files = evidence_map.get("sup_workdir_files", "")
+    source_snippets = evidence_map.get("sup_source_snippets", "")
+    similar_configs = evidence_map.get("sup_similar_configs", "")
+    git_context = evidence_map.get("sup_git_context", "")
 
     # Detect OOM and signal flags from syslog
     syslog_lower = syslog_content.lower()
@@ -269,6 +272,9 @@ async def process_supervisor_incident(
         uptime_load=uptime_load,
         referenced_paths=referenced_paths,
         workdir_files=workdir_files,
+        source_snippets=source_snippets,
+        similar_configs=similar_configs,
+        git_context=git_context,
     )
 
     # Add rule hints if matched

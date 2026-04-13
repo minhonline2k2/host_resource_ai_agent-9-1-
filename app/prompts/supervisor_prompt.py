@@ -55,15 +55,46 @@ GUARDRAILS:
 
 immediate_action.commands phải THỰC SỰ FIX được vấn đề, KHÔNG PHẢI chỉ kiểm tra.
 
-[CONFIG_ERR] — file config thiếu/sai:
-  1. Nhìn section "FILE/DIRECTORY TRONG STDERR" và "WORKING DIRECTORY" để tìm file backup (.bak, .orig, .old).
-  2. NẾU THẤY file .bak tồn tại → commands PHẢI include:
-     cp <file>.bak <file>
-     sudo supervisorctl restart <process>
-  3. NẾU KHÔNG có backup → tạo file template tối thiểu:
-     echo '<nội dung JSON/YAML mặc định>' | sudo tee <file>
-     sudo supervisorctl restart <process>
-  4. KHÔNG bao giờ chỉ `ls` và restart — phải RESTORE hoặc RECREATE file.
+[CONFIG_ERR] — file config thiếu/sai — ƯU TIÊN THEO DECISION TREE:
+
+  ƯU TIÊN 1: Có file backup?
+    → Check section "WORKING DIRECTORY" và "FILE/DIRECTORY TRONG STDERR"
+    → Tìm file cùng tên + đuôi .bak, .orig, .old, ~
+    → NẾU CÓ: cp <backup> <missing_file> && sudo supervisorctl restart <process>
+
+  ƯU TIÊN 2: Có git repo?
+    → Check section "GIT CONTEXT"
+    → NẾU có git VÀ file đã từng commit:
+      cd <workdir> && git checkout HEAD -- <missing_file>
+      sudo supervisorctl restart <process>
+
+  ƯU TIÊN 3: Có file cùng format lân cận?
+    → Check section "SIMILAR CONFIG FILES"
+    → NẾU có file .json/.yaml/.conf khác tương tự:
+      cp <similar_file> <missing_file>  # rồi dặn operator edit cho đúng
+      sudo supervisorctl restart <process>
+      + trong description_vi: CẢNH BÁO "file này copy từ X, cần edit lại trước khi chạy production"
+
+  ƯU TIÊN 4: Tự suy luận từ SOURCE CODE
+    → Đọc section "SOURCE CODE CUA APP" để hiểu code đọc config thế nào
+    → Suy ra MINIMUM fields cần có (VD: code dùng config["port"], config["db_host"]
+      → template phải có 2 field này)
+    → Tạo template MINIMUM hợp lý:
+      echo '{"field1": "default_value", "field2": 0}' | sudo tee <missing_file>
+      sudo supervisorctl restart <process>
+    → ĐÁNH severity = HIGH, escalate = true
+    → Trong description_vi: CẢNH BÁO "template tự sinh, cần review trước khi chạy production"
+
+  ƯU TIÊN 5 (fallback): KHÔNG ĐỦ CONTEXT
+    → immediate_action.commands = [] (không chạy lệnh nguy hiểm)
+    → escalate = true
+    → ask_for_more_info = "Cần operator cung cấp nội dung file <path> hoặc vị trí backup"
+    → root_fix.steps_vi = hướng dẫn operator manual
+
+KHÔNG BAO GIỜ:
+  - Chỉ `ls` và restart (file vẫn thiếu → service lại crash)
+  - Ghi file mặc định MÀ KHÔNG biết format (dễ làm hỏng nặng hơn)
+  - Thực thi lệnh phá hoại (rm, truncate, >) trừ khi rõ ràng cần thiết
 
 [PERM_ERR] — sai quyền file:
   1. commands PHẢI include `chmod`/`chown` cụ thể:
@@ -149,6 +180,9 @@ def build_supervisor_evidence_pack(
     uptime_load: str = "",
     referenced_paths: str = "",
     workdir_files: str = "",
+    source_snippets: str = "",
+    similar_configs: str = "",
+    git_context: str = "",
 ) -> str:
     """Build the evidence pack string for supervisor LLM prompt."""
     parts = []
@@ -289,6 +323,30 @@ def build_supervisor_evidence_pack(
         parts.append("Cac file trong thu muc lam viec + backup files neu co.")
         parts.append("```")
         parts.append(workdir_files.strip()[:2500])
+        parts.append("```")
+
+    if source_snippets and source_snippets.strip():
+        parts.append("")
+        parts.append("## SOURCE CODE CUA APP (file .py/.sh mention trong traceback)")
+        parts.append("DUNG DE SUY LUAN: config cần format gì, field gì, gọi dep gì.")
+        parts.append("```")
+        parts.append(source_snippets.strip()[:4000])
+        parts.append("```")
+
+    if similar_configs and similar_configs.strip():
+        parts.append("")
+        parts.append("## SIMILAR CONFIG FILES (cùng extension trong thư mục lân cận)")
+        parts.append("DUNG DE SUY LUAN: file config bi thieu CO THE co format giong cac file nay.")
+        parts.append("```")
+        parts.append(similar_configs.strip()[:3500])
+        parts.append("```")
+
+    if git_context and git_context.strip():
+        parts.append("")
+        parts.append("## GIT CONTEXT (nếu có)")
+        parts.append("DUNG DE: rollback deploy gần đây, biết file vừa bị thay đổi.")
+        parts.append("```")
+        parts.append(git_context.strip()[:2000])
         parts.append("```")
 
     parts.append("")

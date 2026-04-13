@@ -104,6 +104,53 @@ def build_supervisor_command_pack(
         "supervisor_paths",
     ))
 
+    # Source code snippets: read .py/.sh/.js file mentioned in stderr traceback
+    # Giup LLM hieu code goi config the nao → tu sinh config template
+    commands.append((
+        "sup_source_snippets",
+        f"STDERR=$(tail -n 200 /var/log/supervisor/{process_name}/{process_name}.err.log 2>/dev/null || "
+        f"tail -n 200 /var/log/supervisor/{process_name}.err.log 2>/dev/null || "
+        f"tail -n 200 /var/log/supervisor/{process_name}-stderr.log 2>/dev/null); "
+        f"echo \"$STDERR\" | grep -oE '/[a-zA-Z0-9_./-]+\\.(py|sh|js|ts|rb|go|php)' "
+        f"| sort -u | head -3 | while read F; do "
+        f"if [ -r \"$F\" ]; then "
+        f"echo \"=== SOURCE: $F ===\"; "
+        f"head -80 \"$F\" 2>/dev/null; "
+        f"echo \"...\"; fi; done",
+        "supervisor_source",
+    ))
+
+    # Similar config files nearby — giup LLM biet format khi khong co backup
+    commands.append((
+        "sup_similar_configs",
+        f"STDERR=$(tail -n 200 /var/log/supervisor/{process_name}/{process_name}.err.log 2>/dev/null || "
+        f"tail -n 200 /var/log/supervisor/{process_name}.err.log 2>/dev/null); "
+        f"MISSING=$(echo \"$STDERR\" | grep -oE '/[a-zA-Z0-9_./-]+\\.(json|yaml|yml|conf|ini|cfg|env|toml)' | head -1); "
+        f"if [ -n \"$MISSING\" ]; then "
+        f"DIR=$(dirname \"$MISSING\"); EXT=\"${{MISSING##*.}}\"; "
+        f"echo \"=== Missing file: $MISSING (ext: $EXT) ===\"; "
+        f"echo \"--- Similar *.$EXT files in $DIR and siblings ---\"; "
+        f"find \"$DIR\" -maxdepth 3 -name \"*.$EXT\" 2>/dev/null | head -5 | while read F; do "
+        f"echo \">>> $F\"; head -40 \"$F\" 2>/dev/null; echo \"---\"; done; "
+        f"fi",
+        "supervisor_similar_configs",
+    ))
+
+    # Git context: neu working dir la git repo, show last commits + file history
+    commands.append((
+        "sup_git_context",
+        f"DIR=$(grep -A 20 '\\[program:{process_name}\\]' /etc/supervisor/conf.d/*.conf /etc/supervisor/conf.d/*.ini /etc/supervisor/supervisord.conf 2>/dev/null "
+        f"| grep -oE 'directory\\s*=\\s*[^ ]+' | head -1 | cut -d'=' -f2 | tr -d ' '); "
+        f"if [ -n \"$DIR\" ] && [ -d \"$DIR/.git\" ]; then "
+        f"echo \"=== Git repo at $DIR ===\"; "
+        f"cd \"$DIR\" && git log --oneline -5 2>/dev/null; "
+        f"echo \"--- Git status ---\"; git status --short 2>/dev/null | head -20; "
+        f"echo \"--- Recent modified files (last 24h) ---\"; "
+        f"find \"$DIR\" -maxdepth 3 -mtime -1 -type f 2>/dev/null | head -15; "
+        f"else echo 'Not a git repo or no workdir'; fi",
+        "supervisor_git",
+    ))
+
     # Working directory contents from supervisor config
     commands.append((
         "sup_workdir_files",
