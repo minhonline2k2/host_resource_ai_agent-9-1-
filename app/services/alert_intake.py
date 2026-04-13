@@ -116,7 +116,7 @@ class AlertIntakeService:
         logger.info(f"[INTAKE] 📋 Normalized id={norm_id}: resource={resource_type} "
                     f"role={component_type} entity={entity_name}")
 
-        # 3. Dedup check — ONLY short-term duplicate within Redis TTL
+        # 3a. Dedup check — short-term duplicate within Redis TTL
         if await self.redis.check_dedup(fingerprint):
             logger.info(f"[INTAKE] 🔁 Deduplicated (same alert within {self.redis.settings.redis_dedup_ttl}s TTL)")
             await self.repo.save_audit(
@@ -124,6 +124,27 @@ class AlertIntakeService:
                 entity_type="alert", entity_id=str(norm_id),
                 details={"alert_name": alert_name, "instance": instance},
             )
+            await self.db.commit()
+            return None
+
+        # 3b. DB-level dedup — kiểm tra nếu đã có incident ĐANG MỞ cho cùng alert+instance
+        #     Tránh tạo trùng khi Alertmanager gửi lại sau repeat_interval (4h)
+        existing = await self.repo.find_open_incident(alert_name, instance)
+        if existing:
+            logger.info(f"[INTAKE] 🔁 DB-level dedup: incident {existing.id} ({existing.incident_number}) "
+                        f"đang {existing.status} cho {alert_name}@{instance} — bỏ qua")
+            # Ghi audit để biết alert vẫn đang fire
+            await self.repo.save_audit(
+                event_type="alert_deduplicated_db",
+                entity_type="incident", entity_id=existing.id,
+                details={
+                    "alert_name": alert_name, "instance": instance,
+                    "existing_status": existing.status,
+                    "reason": "Open incident already exists for same alert+instance",
+                },
+            )
+            # Refresh dedup key để tránh tạo trùng tiếp
+            await self.redis.set_dedup(fingerprint, existing.id)
             await self.db.commit()
             return None
 
@@ -157,13 +178,14 @@ class AlertIntakeService:
             {"alert_name": alert_name, "instance": instance},
         )
 
-        # 6. Queue for worker
-        await self.redis.push_incident(inc_id)
-        logger.info(f"[INTAKE] ✅ Incident {inc_id} created and queued for processing")
-
+        # 6. Commit DB FIRST — worker sẽ query DB ngay khi nhận từ queue
         await self.db.commit()
 
-        # 7. Publish realtime
+        # 7. Queue for worker — chỉ push SAU KHI DB đã commit xong
+        await self.redis.push_incident(inc_id)
+        logger.info(f"[INTAKE] ✅ Incident {inc_id} created, committed, and queued for processing")
+
+        # 8. Publish realtime
         await self.redis.publish_event("incident_created", {
             "incident_id": inc_id, "alert_name": alert_name,
             "instance": instance, "severity": severity,

@@ -60,6 +60,21 @@ class IncidentRepository:
         result = await self.db.execute(select(Incident).where(Incident.id == incident_id))
         return result.scalar_one_or_none()
 
+    async def find_open_incident(self, alert_name: str, instance: str) -> Optional[Incident]:
+        """Tìm incident đang mở (chưa resolved/closed) cho cùng alert_name + instance.
+        Dùng để dedup ở tầng DB — tránh tạo trùng khi Alertmanager gửi lại."""
+        result = await self.db.execute(
+            select(Incident)
+            .where(
+                Incident.alert_name == alert_name,
+                Incident.instance == instance,
+                Incident.status.in_(list(IncidentStatus.ACTIVE_STATUSES)),
+            )
+            .order_by(desc(Incident.created_at))
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def update_incident(self, incident_id: str, **kwargs) -> None:
         await self.db.execute(
             update(Incident).where(Incident.id == incident_id).values(**kwargs, updated_at=func.now())

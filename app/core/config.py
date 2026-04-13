@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str = "redis://redis:6379/0"
-    redis_dedup_ttl: int = 300
+    redis_dedup_ttl: int = 3600  # 1h — DB-level dedup sẽ bắt các alert lặp sau TTL
     redis_approval_ttl: int = 3600
     redis_exec_lock_ttl: int = 600
 
