@@ -49,7 +49,47 @@ GUARDRAILS:
 - stderr rỗng + stdout sạch     → category = [UNKNOWN]
 - confidence < 0.5              → ask_for_more_info bắt buộc
 - disk_pct > 95                  → thêm lệnh dọn disk vào commands
-- Luôn trả JSON hợp lệ dù log rỗng"""
+- Luôn trả JSON hợp lệ dù log rỗng
+
+=== NGUYÊN TẮC ĐƯA COMMANDS (QUAN TRỌNG) ===
+
+immediate_action.commands phải THỰC SỰ FIX được vấn đề, KHÔNG PHẢI chỉ kiểm tra.
+
+[CONFIG_ERR] — file config thiếu/sai:
+  1. Nhìn section "FILE/DIRECTORY TRONG STDERR" và "WORKING DIRECTORY" để tìm file backup (.bak, .orig, .old).
+  2. NẾU THẤY file .bak tồn tại → commands PHẢI include:
+     cp <file>.bak <file>
+     sudo supervisorctl restart <process>
+  3. NẾU KHÔNG có backup → tạo file template tối thiểu:
+     echo '<nội dung JSON/YAML mặc định>' | sudo tee <file>
+     sudo supervisorctl restart <process>
+  4. KHÔNG bao giờ chỉ `ls` và restart — phải RESTORE hoặc RECREATE file.
+
+[PERM_ERR] — sai quyền file:
+  1. commands PHẢI include `chmod`/`chown` cụ thể:
+     sudo chown <user>:<group> <path>
+     sudo chmod <mode> <path>
+     sudo supervisorctl restart <process>
+
+[DEP_FAIL] — DB/Redis/API chết:
+  1. Check service: systemctl status <dep>
+  2. Restart nếu xuống: sudo systemctl restart <dep>
+  3. Rồi restart process
+
+[CODE_ERR] — exception trong code:
+  1. immediate_action: restart tạm thời (sudo supervisorctl restart)
+  2. root_fix.steps_vi: mô tả code/patch cần sửa (không phải commands)
+
+[OOM]:
+  1. Restart ngay: sudo supervisorctl restart <process>
+  2. Check top memory: ps aux --sort=-rss | head
+  3. root_fix: nâng memory limit hoặc tối ưu code
+
+QUY TẮC VÀNG cho immediate_action.commands:
+- Mỗi command phải CHẠY ĐƯỢC NGAY qua bash (không có placeholder <xxx> ngoại trừ đường dẫn thực từ evidence)
+- Thứ tự: [fix root cause] → [verify fix] → [restart service] → [confirm running]
+- Lệnh cuối cùng NÊN là `sudo supervisorctl status <process>` để kiểm tra kết quả
+- Dùng ĐƯỜNG DẪN CỤ THỂ từ evidence (vd: /opt/test-apps/api_config.json), không dùng placeholder chung chung"""
 
 
 SUPERVISOR_RESPONSE_SCHEMA = """{
@@ -107,6 +147,8 @@ def build_supervisor_evidence_pack(
     mem_detail: str = "",
     disk_detail: str = "",
     uptime_load: str = "",
+    referenced_paths: str = "",
+    workdir_files: str = "",
 ) -> str:
     """Build the evidence pack string for supervisor LLM prompt."""
     parts = []
@@ -229,6 +271,24 @@ def build_supervisor_evidence_pack(
         parts.append("## SYSTEMD JOURNAL")
         parts.append("```")
         parts.append(journal_log.strip()[:2000])
+        parts.append("```")
+
+    # === THONG TIN FILE PATHS (rat quan trong cho CONFIG_ERR / PERM_ERR) ===
+    if referenced_paths and referenced_paths.strip():
+        parts.append("")
+        parts.append("## FILE/DIRECTORY TRONG STDERR (cac path bi loi)")
+        parts.append("Listing cac thu muc chua file duoc mention trong error log.")
+        parts.append("NEU CO FILE .bak / .orig / .old → DUNG cp DE KHOI PHUC.")
+        parts.append("```")
+        parts.append(referenced_paths.strip()[:3000])
+        parts.append("```")
+
+    if workdir_files and workdir_files.strip():
+        parts.append("")
+        parts.append("## WORKING DIRECTORY CUA PROCESS")
+        parts.append("Cac file trong thu muc lam viec + backup files neu co.")
+        parts.append("```")
+        parts.append(workdir_files.strip()[:2500])
         parts.append("```")
 
     parts.append("")

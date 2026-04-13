@@ -86,6 +86,38 @@ def build_supervisor_command_pack(
         "supervisor_log",
     ))
 
+    # List directories mentioned in recent stderr (find missing files + backups)
+    # Extract paths from FileNotFoundError/IOError/Permission denied, then ls -la each dir
+    commands.append((
+        "sup_referenced_paths",
+        f"STDERR=$(tail -n 200 /var/log/supervisor/{process_name}/{process_name}.err.log 2>/dev/null || "
+        f"tail -n 200 /var/log/supervisor/{process_name}.err.log 2>/dev/null || "
+        f"tail -n 200 /var/log/supervisor/{process_name}-stderr.log 2>/dev/null); "
+        f"echo \"$STDERR\" | grep -oE \"'/[^']*'|\\\"/[^\\\"]*\\\"|/[a-zA-Z0-9_./-]+\\.(json|yaml|yml|conf|ini|cfg|env|toml|py|sh|log|db|sock|pid)\" "
+        f"| tr -d \"'\\\"\" | sort -u | head -10 | while read P; do "
+        f"DIR=$(dirname \"$P\"); "
+        f"echo \"=== Referenced path: $P ===\"; "
+        f"if [ -e \"$P\" ]; then echo \"EXISTS: $(ls -la \"$P\" 2>/dev/null)\"; else echo \"NOT FOUND: $P\"; fi; "
+        f"echo \"--- Directory listing: $DIR ---\"; "
+        f"ls -la \"$DIR\" 2>/dev/null | head -30 || echo \"(directory not accessible)\"; "
+        f"done",
+        "supervisor_paths",
+    ))
+
+    # Working directory contents from supervisor config
+    commands.append((
+        "sup_workdir_files",
+        f"DIR=$(grep -A 20 '\\[program:{process_name}\\]' /etc/supervisor/conf.d/*.conf /etc/supervisor/conf.d/*.ini /etc/supervisor/supervisord.conf 2>/dev/null "
+        f"| grep -oE 'directory\\s*=\\s*[^ ]+' | head -1 | cut -d'=' -f2 | tr -d ' '); "
+        f"if [ -n \"$DIR\" ] && [ -d \"$DIR\" ]; then "
+        f"echo \"=== Working directory: $DIR ===\"; "
+        f"ls -la \"$DIR\" 2>/dev/null | head -50; "
+        f"echo \"--- Backup files (*.bak, *.orig, *.old) ---\"; "
+        f"find \"$DIR\" -maxdepth 2 \\( -name '*.bak' -o -name '*.orig' -o -name '*.old' -o -name '*~' \\) 2>/dev/null | head -20; "
+        f"else echo 'No working directory in supervisor config'; fi",
+        "supervisor_workdir",
+    ))
+
     # Process-specific: neu process dang RUNNING, lay them PID info
     commands.append((
         "sup_proc_detail",

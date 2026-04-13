@@ -144,6 +144,8 @@ async def process_supervisor_incident(
     network_info = evidence_map.get("sup_network", "")
     journal_log = evidence_map.get("sup_journal", "")
     uptime_load = evidence_map.get("sup_uptime_load", "")
+    referenced_paths = evidence_map.get("sup_referenced_paths", "")
+    workdir_files = evidence_map.get("sup_workdir_files", "")
 
     # Detect OOM and signal flags from syslog
     syslog_lower = syslog_content.lower()
@@ -265,6 +267,8 @@ async def process_supervisor_incident(
         mem_detail=mem_detail,
         disk_detail=disk_detail,
         uptime_load=uptime_load,
+        referenced_paths=referenced_paths,
+        workdir_files=workdir_files,
     )
 
     # Add rule hints if matched
@@ -361,10 +365,28 @@ async def process_supervisor_incident(
         # Option 2: Root fix
         if root_fix.get("steps_vi"):
             fix_commands = []
+            # Mở rộng danh sách bash commands có thể thực thi được
+            bash_prefixes = (
+                "sudo ", "supervisorctl ", "systemctl ", "service ",
+                "cp ", "mv ", "rm ", "mkdir ", "rmdir ", "ln ", "touch ",
+                "chmod ", "chown ", "chgrp ",
+                "echo ", "cat ", "tee ", "sed ", "awk ", "grep ",
+                "ls ", "find ", "tar ", "unzip ", "gzip ",
+                "curl ", "wget ", "git ", "pip ", "pip3 ",
+                "python ", "python3 ", "node ", "npm ",
+                "apt ", "apt-get ", "yum ", "dnf ", "docker ",
+                "kill ", "pkill ", "nohup ",
+                "export ", "source ", "bash ", "sh ",
+            )
             for step in root_fix.get("steps_vi", []):
-                # Only add bash-executable steps
-                if step.strip().startswith(("sudo ", "vi ", "nano ", "systemctl ", "supervisorctl ")):
-                    fix_commands.append(step)
+                s = step.strip()
+                # Bỏ prefix kiểu "1. ", "- ", "* " để check command
+                for prefix in ("1. ", "2. ", "3. ", "4. ", "5. ", "- ", "* ", "+ "):
+                    if s.startswith(prefix):
+                        s = s[len(prefix):].strip()
+                        break
+                if s.startswith(bash_prefixes):
+                    fix_commands.append(s)
 
             options.append({
                 "priority": 2,
