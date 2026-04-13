@@ -4,6 +4,8 @@ services:
     ports:
       - "8082:8082"
     env_file: .env.docker
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
     depends_on:
       db:
         condition: service_healthy
@@ -12,6 +14,7 @@ services:
     volumes:
       - ./static:/app/static
       - ssh_keys:/home/devops/.ssh:ro
+      - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8082
 
@@ -19,6 +22,8 @@ services:
     build: .
     command: python -m app.workers.run_worker
     env_file: .env.docker
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
     depends_on:
       db:
         condition: service_healthy
@@ -26,6 +31,7 @@ services:
         condition: service_healthy
     volumes:
       - ssh_keys:/home/devops/.ssh:ro
+      - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
 
   db:
@@ -35,10 +41,12 @@ services:
       MYSQL_DATABASE: host_resource_agent
       MYSQL_USER: ai_bot
       MYSQL_PASSWORD: "123"
+      TZ: Asia/Ho_Chi_Minh
     ports:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+      - /etc/localtime:/etc/localtime:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 5s
