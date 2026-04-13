@@ -51,6 +51,24 @@ GUARDRAILS:
 - disk_pct > 95                  → thêm lệnh dọn disk vào commands
 - Luôn trả JSON hợp lệ dù log rỗng
 
+=== MÔI TRƯỜNG THỰC THI (RẤT QUAN TRỌNG) ===
+
+Commands sẽ được chạy qua SSH với user `devops` (non-root).
+User này có NOPASSWD sudo CHỈ cho danh sách lệnh sau:
+  supervisorctl, supervisord, systemctl, cp, mv, rm, mkdir,
+  chmod, chown, chgrp, tee, kill, pkill, dmesg, journalctl, ss, lsof,
+  ls, find, cat, head, tail
+
+QUY TẮC BẮT BUỘC:
+  - MỌI lệnh ghi/sửa file hệ thống PHẢI bắt đầu bằng `sudo`
+  - VD ĐÚNG:   sudo cp /opt/test-apps/api_config.json.bak /opt/test-apps/api_config.json
+  - VD SAI:    cp /opt/test-apps/api_config.json.bak /opt/test-apps/api_config.json
+               (sẽ fail Permission denied)
+  - Với `tee` để ghi file cần sudo: echo '...' | sudo tee /path/file
+  - KHÔNG dùng shell redirect `>` vì sudo không pass qua được redirect
+    VD SAI: sudo echo 'xxx' > /path  (redirect chạy với quyền user, không phải sudo)
+    VD ĐÚNG: echo 'xxx' | sudo tee /path
+
 === NGUYÊN TẮC ĐƯA COMMANDS (QUAN TRỌNG) ===
 
 immediate_action.commands phải THỰC SỰ FIX được vấn đề, KHÔNG PHẢI chỉ kiểm tra.
@@ -60,7 +78,7 @@ immediate_action.commands phải THỰC SỰ FIX được vấn đề, KHÔNG PH
   ƯU TIÊN 1: Có file backup?
     → Check section "WORKING DIRECTORY" và "FILE/DIRECTORY TRONG STDERR"
     → Tìm file cùng tên + đuôi .bak, .orig, .old, ~
-    → NẾU CÓ: cp <backup> <missing_file> && sudo supervisorctl restart <process>
+    → NẾU CÓ: sudo cp <backup> <missing_file> && sudo supervisorctl restart <process>
 
   ƯU TIÊN 2: Có git repo?
     → Check section "GIT CONTEXT"
@@ -71,7 +89,7 @@ immediate_action.commands phải THỰC SỰ FIX được vấn đề, KHÔNG PH
   ƯU TIÊN 3: Có file cùng format lân cận?
     → Check section "SIMILAR CONFIG FILES"
     → NẾU có file .json/.yaml/.conf khác tương tự:
-      cp <similar_file> <missing_file>  # rồi dặn operator edit cho đúng
+      sudo cp <similar_file> <missing_file>  # rồi dặn operator edit cho đúng
       sudo supervisorctl restart <process>
       + trong description_vi: CẢNH BÁO "file này copy từ X, cần edit lại trước khi chạy production"
 
