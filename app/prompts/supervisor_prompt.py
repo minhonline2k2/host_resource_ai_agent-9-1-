@@ -276,54 +276,56 @@ def build_supervisor_evidence_pack(
         parts.append(content.strip()[:max_chars])
         parts.append("```")
 
-    # STDERR — quan trong nhat, dung compress de giu traceback
+    # STDERR — quan trong nhat, giu day du
     parts.append("")
-    parts.append("## STDERR (traceback + exception)")
+    parts.append("## STDERR LOG (.err) — 150 dong cuoi (QUAN TRONG NHAT)")
     parts.append("```")
-    parts.append(_compress_stderr(stderr_content, max_chars=4000))
+    parts.append(stderr_content[:8000] if stderr_content.strip() else "(rong)")
     parts.append("```")
 
-    add("STDOUT LOG (tail)", stdout_content, 2000)
-    add(f"SUPERVISOR CONFIG [program:{process_name}]", supervisor_conf, 1500, lang="ini")
+    add("STDOUT LOG — 80 dong cuoi", stdout_content, 5000)
+    add(f"SUPERVISOR CONFIG [program:{process_name}]", supervisor_conf, 3000, lang="ini")
 
-    # Trang thai he thong — 1 dong gon
+    # Trang thai he thong
     parts.append("")
-    parts.append("## SYSTEM STATE")
-    parts.append(f"MEM_FREE_MB={mem_free_mb} | DISK_PCT={disk_pct} | OOM={oom_flag} | SIG_FLAG={signal_flag}")
+    parts.append("## TRANG THAI HE THONG")
+    parts.append(f"MEM_FREE_MB:      {mem_free_mb}")
+    parts.append(f"DISK_USAGE_PCT:   {disk_pct}")
+    parts.append(f"OOM_IN_SYSLOG:    {oom_flag}")
+    parts.append(f"SIGNAL_IN_SYSLOG: {signal_flag}")
 
-    add("MEMORY DETAIL (free -m)", mem_detail, 600)
-    add("DISK DETAIL (df -h)", disk_detail, 800)
-    add("PROCESS RUNTIME INFO", proc_detail, 1200)
-    add("PROCESS ENV (filtered)", proc_env, 1200)
+    add("MEMORY DETAIL (free -m)", mem_detail, 1000)
+    add("DISK DETAIL (df -h)", disk_detail, 1500)
+    add("PROCESS RUNTIME INFO", proc_detail, 2000)
+    add("PROCESS ENV (filtered)", proc_env, 2000)
 
-    # Restart history ưu tiên, fallback sang supervisord log
-    if not _is_useless(restart_history):
-        add("RESTART HISTORY", restart_history, 1500)
-    else:
-        add("SUPERVISORD LOG (tail)", supervisord_log, 2000)
+    # Restart history + supervisord log (ca 2 neu co)
+    add("RESTART HISTORY (40 dong cuoi)", restart_history, 3000)
+    add("SUPERVISORD LOG (80 dong cuoi)", supervisord_log, 4000)
 
-    add("DMESG RECENT", dmesg_recent, 1500)
-    add("TOP BY MEM (RSS)", top_mem, 1200)
-    add("TOP BY CPU", top_cpu, 800)
-    add("LISTENING PORTS", network_info, 800)
-    add("SYSTEMD JOURNAL", journal_log, 1200)
+    add("DMESG RECENT (40 dong cuoi)", dmesg_recent, 3000)
+    add("TOP PROCESSES BY MEMORY (RSS)", top_mem, 2000)
+    add("TOP PROCESSES BY CPU", top_cpu, 1500)
+    add("LISTENING PORTS (ss -tlnp)", network_info, 1500)
+    add("SYSTEMD JOURNAL", journal_log, 2000)
 
     # === REMEDIATION-ORIENTED EVIDENCE (quan trong nhat sau stderr) ===
-    add("FILE PATHS TRONG STDERR (+ directory listing)",
-        referenced_paths, 2000,
-        hint="Neu thay file .bak/.orig/.old → dung cp de khoi phuc.")
+    add("FILE/DIRECTORY TRONG STDERR (cac path bi loi)",
+        referenced_paths, 3000,
+        hint="NEU CO FILE .bak / .orig / .old → DUNG cp DE KHOI PHUC.")
 
-    add("WORKING DIRECTORY (backup files neu co)", workdir_files, 1500)
+    add("WORKING DIRECTORY CUA PROCESS (backup files neu co)",
+        workdir_files, 2500)
 
     add("SOURCE CODE CUA APP (file trong traceback)",
-        source_snippets, 2500,
-        hint="Dung de suy luan: config can fields gi, app goi dep gi.")
+        source_snippets, 4000,
+        hint="DUNG DE SUY LUAN: config can fields gi, app goi dep gi.")
 
     add("SIMILAR CONFIG FILES (cung extension trong thu muc lan can)",
-        similar_configs, 2500,
+        similar_configs, 3500,
         hint="File config bi thieu CO THE co format giong cac file nay.")
 
-    add("GIT CONTEXT (neu co)", git_context, 1500,
+    add("GIT CONTEXT (neu co)", git_context, 2000,
         hint="Dung de rollback deploy gan day, biet file vua bi thay doi.")
 
     parts.append("")
