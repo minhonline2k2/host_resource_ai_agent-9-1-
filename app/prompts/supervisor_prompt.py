@@ -150,6 +150,53 @@ SUPERVISOR_RESPONSE_SCHEMA = """{
 }"""
 
 
+def _is_useless(text: str) -> bool:
+    """Return True nếu section khong chua thong tin co ich → skip."""
+    if not text or not text.strip():
+        return True
+    t = text.strip().lower()
+    useless_markers = (
+        "not found", "not running", "khong tim thay", "(rong)", "(empty)",
+        "no working directory", "not a git repo", "no config",
+        "cannot read", "permission denied",
+    )
+    # Neu content < 20 ky tu VA chi chua marker vo ich
+    if len(t) < 80 and any(m in t for m in useless_markers):
+        return True
+    return False
+
+
+def _compress_stderr(text: str, max_chars: int = 4000) -> str:
+    """Nén stderr: ưu tiên giữ traceback + exception message, bỏ debug noise.
+
+    Stderr thường có pattern: log debug/info dài → cuối cùng là Traceback + Exception.
+    Giữ traceback (quan trọng nhất) + vài dòng context trước đó.
+    """
+    if not text or not text.strip():
+        return "(rong)"
+    if len(text) <= max_chars:
+        return text
+
+    lines = text.splitlines()
+    # Tìm line chứa Traceback hoặc Exception name
+    tb_idx = -1
+    for i, line in enumerate(lines):
+        if "Traceback (most recent call last)" in line:
+            tb_idx = i
+            break
+    if tb_idx == -1:
+        # Không có traceback → giữ 100 dòng cuối
+        return "\n".join(lines[-100:])[:max_chars]
+
+    # Giữ 10 dòng context trước traceback + toàn bộ traceback đến hết
+    start = max(0, tb_idx - 10)
+    compressed = "\n".join(lines[start:])
+    if len(compressed) > max_chars:
+        # Nếu traceback quá dài, giữ đầu (exception type) + cuối (exception message)
+        compressed = compressed[:max_chars // 2] + "\n...[TRUNCATED]...\n" + compressed[-max_chars // 2:]
+    return compressed
+
+
 def build_supervisor_evidence_pack(
     process_name: str,
     group_name: str,
@@ -199,155 +246,67 @@ def build_supervisor_evidence_pack(
     if uptime_load:
         parts.append(f"SYSTEM_LOAD:       {uptime_load.strip()}")
 
-    # STDERR — thong tin quan trong nhat cho LLM
+    def add(title: str, content: str, max_chars: int = 1500, lang: str = "", hint: str = ""):
+        """Helper: only add section if content is useful."""
+        if _is_useless(content):
+            return
+        parts.append("")
+        parts.append(f"## {title}")
+        if hint:
+            parts.append(hint)
+        parts.append(f"```{lang}")
+        parts.append(content.strip()[:max_chars])
+        parts.append("```")
+
+    # STDERR — quan trong nhat, dung compress de giu traceback
     parts.append("")
-    parts.append("## STDERR LOG (.err) — 150 dong cuoi (QUAN TRONG NHAT)")
+    parts.append("## STDERR (traceback + exception)")
     parts.append("```")
-    parts.append(stderr_content[:8000] if stderr_content.strip() else "(rong)")
+    parts.append(_compress_stderr(stderr_content, max_chars=4000))
     parts.append("```")
 
-    # STDOUT — context truoc khi crash
+    add("STDOUT LOG (tail)", stdout_content, 2000)
+    add(f"SUPERVISOR CONFIG [program:{process_name}]", supervisor_conf, 1500, lang="ini")
+
+    # Trang thai he thong — 1 dong gon
     parts.append("")
-    parts.append("## STDOUT LOG (.out) — 80 dong cuoi")
-    parts.append("```")
-    parts.append(stdout_content[:5000] if stdout_content.strip() else "(rong)")
-    parts.append("```")
+    parts.append("## SYSTEM STATE")
+    parts.append(f"MEM_FREE_MB={mem_free_mb} | DISK_PCT={disk_pct} | OOM={oom_flag} | SIG_FLAG={signal_flag}")
 
-    # Supervisor config
-    parts.append("")
-    parts.append(f"## SUPERVISOR CONFIG — [program:{process_name}]")
-    parts.append("```ini")
-    parts.append(supervisor_conf if supervisor_conf.strip() else "(khong tim thay)")
-    parts.append("```")
+    add("MEMORY DETAIL (free -m)", mem_detail, 600)
+    add("DISK DETAIL (df -h)", disk_detail, 800)
+    add("PROCESS RUNTIME INFO", proc_detail, 1200)
+    add("PROCESS ENV (filtered)", proc_env, 1200)
 
-    # Trang thai he thong
-    parts.append("")
-    parts.append("## TRANG THAI HE THONG")
-    parts.append(f"MEM_FREE_MB:      {mem_free_mb}")
-    parts.append(f"DISK_USAGE_PCT:   {disk_pct}")
-    parts.append(f"OOM_IN_SYSLOG:    {oom_flag}")
-    parts.append(f"SIGNAL_IN_SYSLOG: {signal_flag}")
+    # Restart history ưu tiên, fallback sang supervisord log
+    if not _is_useless(restart_history):
+        add("RESTART HISTORY", restart_history, 1500)
+    else:
+        add("SUPERVISORD LOG (tail)", supervisord_log, 2000)
 
-    if mem_detail and mem_detail.strip():
-        parts.append("")
-        parts.append("## MEMORY DETAIL (free -m)")
-        parts.append("```")
-        parts.append(mem_detail.strip()[:1000])
-        parts.append("```")
+    add("DMESG RECENT", dmesg_recent, 1500)
+    add("TOP BY MEM (RSS)", top_mem, 1200)
+    add("TOP BY CPU", top_cpu, 800)
+    add("LISTENING PORTS", network_info, 800)
+    add("SYSTEMD JOURNAL", journal_log, 1200)
 
-    if disk_detail and disk_detail.strip():
-        parts.append("")
-        parts.append("## DISK DETAIL (df -h)")
-        parts.append("```")
-        parts.append(disk_detail.strip()[:1500])
-        parts.append("```")
+    # === REMEDIATION-ORIENTED EVIDENCE (quan trong nhat sau stderr) ===
+    add("FILE PATHS TRONG STDERR (+ directory listing)",
+        referenced_paths, 2000,
+        hint="Neu thay file .bak/.orig/.old → dung cp de khoi phuc.")
 
-    # Process detail — PID, RSS, threads, FD
-    if proc_detail and proc_detail.strip() and "Process not running" not in proc_detail:
-        parts.append("")
-        parts.append("## PROCESS RUNTIME INFO")
-        parts.append("```")
-        parts.append(proc_detail.strip()[:2000])
-        parts.append("```")
+    add("WORKING DIRECTORY (backup files neu co)", workdir_files, 1500)
 
-    # Process environment (filtered — no secrets)
-    if proc_env and proc_env.strip() and "Process not running" not in proc_env:
-        parts.append("")
-        parts.append("## PROCESS ENVIRONMENT (filtered)")
-        parts.append("```")
-        parts.append(proc_env.strip()[:2000])
-        parts.append("```")
+    add("SOURCE CODE CUA APP (file trong traceback)",
+        source_snippets, 2500,
+        hint="Dung de suy luan: config can fields gi, app goi dep gi.")
 
-    # Lich su restart
-    if restart_history and restart_history.strip():
-        parts.append("")
-        parts.append("## LICH SU RESTART (40 dong cuoi)")
-        parts.append("```")
-        parts.append(restart_history.strip()[:3000])
-        parts.append("```")
-    elif supervisord_log and supervisord_log.strip():
-        parts.append("")
-        parts.append("## SUPERVISORD LOG — 80 dong cuoi")
-        parts.append("```")
-        parts.append(supervisord_log[:4000])
-        parts.append("```")
+    add("SIMILAR CONFIG FILES (cung extension trong thu muc lan can)",
+        similar_configs, 2500,
+        hint="File config bi thieu CO THE co format giong cac file nay.")
 
-    if dmesg_recent and dmesg_recent.strip():
-        parts.append("")
-        parts.append("## DMESG RECENT — 40 dong cuoi")
-        parts.append("```")
-        parts.append(dmesg_recent[:3000])
-        parts.append("```")
-
-    if top_mem and top_mem.strip():
-        parts.append("")
-        parts.append("## TOP PROCESSES BY MEMORY (RSS)")
-        parts.append("```")
-        parts.append(top_mem[:2000])
-        parts.append("```")
-
-    if top_cpu and top_cpu.strip():
-        parts.append("")
-        parts.append("## TOP PROCESSES BY CPU")
-        parts.append("```")
-        parts.append(top_cpu[:1500])
-        parts.append("```")
-
-    if network_info and network_info.strip():
-        parts.append("")
-        parts.append("## LISTENING PORTS (ss -tlnp)")
-        parts.append("```")
-        parts.append(network_info.strip()[:1500])
-        parts.append("```")
-
-    if journal_log and journal_log.strip():
-        parts.append("")
-        parts.append("## SYSTEMD JOURNAL")
-        parts.append("```")
-        parts.append(journal_log.strip()[:2000])
-        parts.append("```")
-
-    # === THONG TIN FILE PATHS (rat quan trong cho CONFIG_ERR / PERM_ERR) ===
-    if referenced_paths and referenced_paths.strip():
-        parts.append("")
-        parts.append("## FILE/DIRECTORY TRONG STDERR (cac path bi loi)")
-        parts.append("Listing cac thu muc chua file duoc mention trong error log.")
-        parts.append("NEU CO FILE .bak / .orig / .old → DUNG cp DE KHOI PHUC.")
-        parts.append("```")
-        parts.append(referenced_paths.strip()[:3000])
-        parts.append("```")
-
-    if workdir_files and workdir_files.strip():
-        parts.append("")
-        parts.append("## WORKING DIRECTORY CUA PROCESS")
-        parts.append("Cac file trong thu muc lam viec + backup files neu co.")
-        parts.append("```")
-        parts.append(workdir_files.strip()[:2500])
-        parts.append("```")
-
-    if source_snippets and source_snippets.strip():
-        parts.append("")
-        parts.append("## SOURCE CODE CUA APP (file .py/.sh mention trong traceback)")
-        parts.append("DUNG DE SUY LUAN: config cần format gì, field gì, gọi dep gì.")
-        parts.append("```")
-        parts.append(source_snippets.strip()[:4000])
-        parts.append("```")
-
-    if similar_configs and similar_configs.strip():
-        parts.append("")
-        parts.append("## SIMILAR CONFIG FILES (cùng extension trong thư mục lân cận)")
-        parts.append("DUNG DE SUY LUAN: file config bi thieu CO THE co format giong cac file nay.")
-        parts.append("```")
-        parts.append(similar_configs.strip()[:3500])
-        parts.append("```")
-
-    if git_context and git_context.strip():
-        parts.append("")
-        parts.append("## GIT CONTEXT (nếu có)")
-        parts.append("DUNG DE: rollback deploy gần đây, biết file vừa bị thay đổi.")
-        parts.append("```")
-        parts.append(git_context.strip()[:2000])
-        parts.append("```")
+    add("GIT CONTEXT (neu co)", git_context, 1500,
+        hint="Dung de rollback deploy gan day, biet file vua bi thay doi.")
 
     parts.append("")
     parts.append("## ==== HET DU LIEU ==== ##")
