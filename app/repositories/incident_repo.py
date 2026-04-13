@@ -61,14 +61,49 @@ class IncidentRepository:
         return result.scalar_one_or_none()
 
     async def find_open_incident(self, alert_name: str, instance: str) -> Optional[Incident]:
-        """Tìm incident đang mở (chưa resolved/closed) cho cùng alert_name + instance.
-        Dùng để dedup ở tầng DB — tránh tạo trùng khi Alertmanager gửi lại."""
+        """Tìm incident đang THỰC SỰ xử lý cho cùng alert_name + instance.
+
+        Chỉ dedup nếu incident đang ở trạng thái đang xử lý (analyzing, action_proposed,
+        executing, v.v.) — KHÔNG dedup incident "new" bị kẹt quá lâu.
+
+        Logic:
+        - Trạng thái "đang xử lý" (evidence_collecting → monitoring): luôn dedup
+        - Trạng thái "new": chỉ dedup nếu tạo trong vòng 10 phút (chờ worker pick up)
+        """
+        from datetime import datetime, timezone, timedelta
+
+        # Các trạng thái đang thực sự xử lý — luôn dedup
+        processing_statuses = {
+            IncidentStatus.EVIDENCE_COLLECTING, IncidentStatus.EVIDENCE_COLLECTED,
+            IncidentStatus.ANALYZING, IncidentStatus.ACTION_PROPOSED,
+            IncidentStatus.APPROVED, IncidentStatus.DISPATCHED,
+            IncidentStatus.EXECUTING, IncidentStatus.MONITORING,
+        }
+
+        # Check 1: incident đang xử lý (bất kể thời gian)
         result = await self.db.execute(
             select(Incident)
             .where(
                 Incident.alert_name == alert_name,
                 Incident.instance == instance,
-                Incident.status.in_(list(IncidentStatus.ACTIVE_STATUSES)),
+                Incident.status.in_(list(processing_statuses)),
+            )
+            .order_by(desc(Incident.created_at))
+            .limit(1)
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            return existing
+
+        # Check 2: incident "new" nhưng mới tạo (< 10 phút) — đang chờ worker
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+        result = await self.db.execute(
+            select(Incident)
+            .where(
+                Incident.alert_name == alert_name,
+                Incident.instance == instance,
+                Incident.status == IncidentStatus.NEW,
+                Incident.created_at >= cutoff,
             )
             .order_by(desc(Incident.created_at))
             .limit(1)
