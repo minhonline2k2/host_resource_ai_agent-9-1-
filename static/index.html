@@ -37,7 +37,7 @@ async function api(path, opts = {}) {
   return null;
 }
 
-const ft = s => { if (!s) return "—"; try { return new Date(s).toLocaleString("vi-VN",{hour12:false}); } catch { return s; } };
+const ft = s => { if (!s) return "—"; try { const raw = String(s); const d = new Date(raw.endsWith("Z")||raw.includes("+")||raw.includes("-",11) ? raw : raw+"Z"); return d.toLocaleString("vi-VN",{hour12:false,timeZone:"Asia/Ho_Chi_Minh"}); } catch { return s; } };
 
 const SC = {
   new:{bg:"#4b5563",label:"Mới",spin:false},
