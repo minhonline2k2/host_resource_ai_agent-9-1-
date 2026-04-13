@@ -201,7 +201,7 @@ class LLMClient:
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": 0.2,
-                "maxOutputTokens": 8192,
+                "maxOutputTokens": 16384,
                 "responseMimeType": "application/json",
             },
         }
@@ -237,17 +237,30 @@ class LLMClient:
                     return None, f"LLM API error: {err_msg}"
 
                 raw_text = ""
+                finish_reason = ""
                 candidates = data.get("candidates", [])
                 if candidates:
+                    finish_reason = candidates[0].get("finishReason", "")
                     parts = candidates[0].get("content", {}).get("parts", [])
                     if parts:
                         raw_text = parts[0].get("text", "")
 
-                if not raw_text:
-                    logger.error(f"[LLM-SUP] ❌ Empty response")
-                    return None, f"Empty response. Full: {json.dumps(data)[:2000]}"
+                # Log prompt_feedback (safety blocks, etc.)
+                pf = data.get("promptFeedback", {})
+                if pf.get("blockReason"):
+                    logger.error(f"[LLM-SUP] ❌ Blocked: {pf.get('blockReason')} — {pf}")
+                    return None, f"Blocked by safety: {pf}"
 
-                logger.info(f"[LLM-SUP] ✅ Got response: {len(raw_text)} chars")
+                logger.info(f"[LLM-SUP] finishReason={finish_reason}, response_len={len(raw_text)}")
+
+                if finish_reason == "MAX_TOKENS":
+                    logger.warning(f"[LLM-SUP] ⚠️ Response TRUNCATED (hit max_tokens) — JSON likely incomplete")
+
+                if not raw_text:
+                    logger.error(f"[LLM-SUP] ❌ Empty response. finishReason={finish_reason}")
+                    return None, f"Empty response (finishReason={finish_reason}). Full: {json.dumps(data)[:2000]}"
+
+                logger.info(f"[LLM-SUP] ✅ Got response: {len(raw_text)} chars, first 300: {raw_text[:300]}")
 
                 # Parse as raw JSON dict
                 parsed = self._parse_supervisor_response(raw_text)
