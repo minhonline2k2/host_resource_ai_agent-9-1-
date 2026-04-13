@@ -265,17 +265,82 @@ class LLMClient:
         return None, "Max retries exceeded"
 
     def _parse_supervisor_response(self, text: str) -> Optional[dict]:
-        """Parse supervisor LLM JSON response into a dict."""
+        """Parse supervisor LLM JSON response into a dict.
+
+        Robust parsing:
+        1. Strip markdown code fences (```json ... ```)
+        2. If still fails, extract first {...} block from anywhere in text
+        3. Try to fix common issues: trailing commas, single quotes
+        """
+        import re
+
+        if not text or not text.strip():
+            logger.error(f"[LLM-SUP] Empty text to parse")
+            return None
+
+        def _try_parse(candidate: str) -> Optional[dict]:
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                return None
+
+        cleaned = text.strip()
+
+        # Attempt 1: remove markdown fences
+        if cleaned.startswith("```"):
+            # Handle ```json\n...\n``` or ```\n...\n```
+            cleaned = re.sub(r"^```(?:json)?\s*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+            cleaned = cleaned.strip()
+
+        data = _try_parse(cleaned)
+
+        # Attempt 2: extract first balanced {...} block
+        if data is None:
+            logger.warning(f"[LLM-SUP] Direct parse failed, trying to extract JSON block...")
+            logger.warning(f"[LLM-SUP] Raw text preview: {text[:500]}")
+            # Find first { and try to extract balanced JSON
+            start = cleaned.find("{")
+            if start >= 0:
+                depth = 0
+                in_string = False
+                escape = False
+                end = -1
+                for i in range(start, len(cleaned)):
+                    ch = cleaned[i]
+                    if escape:
+                        escape = False
+                        continue
+                    if ch == "\\":
+                        escape = True
+                        continue
+                    if ch == '"' and not escape:
+                        in_string = not in_string
+                        continue
+                    if in_string:
+                        continue
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = i + 1
+                            break
+                if end > start:
+                    candidate = cleaned[start:end]
+                    data = _try_parse(candidate)
+
+        # Attempt 3: fix common JSON issues
+        if data is None and cleaned:
+            # Remove trailing commas before } or ]
+            fixed = re.sub(r",(\s*[}\]])", r"\1", cleaned)
+            data = _try_parse(fixed)
+
+        if data is None:
+            logger.error(f"[LLM-SUP] All parse attempts failed. Raw: {text[:1000]}")
+            return None
+
         try:
-            cleaned = text.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-                if cleaned.endswith("```"):
-                    cleaned = cleaned[:-3]
-                cleaned = cleaned.strip()
-
-            data = json.loads(cleaned)
-
             # Ensure required fields exist with defaults
             if "root_cause" not in data:
                 data["root_cause"] = {"category": "UNKNOWN", "summary_vi": "", "evidence": "", "confidence": 0.3}
@@ -306,9 +371,6 @@ class LLMClient:
 
             return data
 
-        except json.JSONDecodeError as e:
-            logger.error(f"[LLM-SUP] JSON parse error: {e}")
-            return None
         except Exception as e:
             logger.error(f"[LLM-SUP] Validation error: {e}", exc_info=True)
             return None
