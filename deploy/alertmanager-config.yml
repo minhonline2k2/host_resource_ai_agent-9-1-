@@ -1,0 +1,14 @@
+route:
+  receiver: ai-alert-platform
+  routes:
+    # Host resource alerts
+    - match_re: { alertname: 'Host.*' }
+      receiver: ai-alert-platform
+    # Supervisor process alerts
+    - match_re: { alertname: 'Supervisor.*' }
+      receiver: ai-alert-platform
+receivers:
+  - name: ai-alert-platform
+    webhook_configs:
+      - url: http://orchestrator:8080/api/v1/alerts/webhook
+        send_resolved: true

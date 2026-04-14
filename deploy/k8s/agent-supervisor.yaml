@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: supervisor-agent, namespace: ai-alert-platform }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: supervisor-agent } }
+  template:
+    metadata: { labels: { app: supervisor-agent } }
+    spec:
+      containers:
+        - name: agent
+          image: ai-alert-platform/supervisor-agent:latest
+          ports: [{ containerPort: 8082 }]
+          envFrom: [{ secretRef: { name: agent-supervisor-secrets } }]
+          env:
+            - { name: ORCHESTRATOR_URL, value: "http://orchestrator:8080" }
+            - { name: AGENT_ID, value: "supervisor-agent" }
+            - { name: AGENT_HOST, value: "supervisor-agent" }
+          volumeMounts: [{ name: ssh-keys, mountPath: /app/ssh_keys, readOnly: true }]
+      volumes: [{ name: ssh-keys, secret: { secretName: ssh-keys-supervisor, defaultMode: 256 } }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: supervisor-agent, namespace: ai-alert-platform }
+spec: { selector: { app: supervisor-agent }, ports: [{ port: 8082 }] }

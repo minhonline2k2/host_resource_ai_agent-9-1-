@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Alert Platform</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0e1a;color:#e2e8f0;min-height:100vh}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.fade-in{animation:fadeIn .3s}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#0f1322}::-webkit-scrollbar-thumb{background:#252d45;border-radius:3px}
+pre{white-space:pre-wrap;word-break:break-all}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback} = React;
+
+// API base — proxy through nginx in docker, direct in dev
+const API = window.location.port === '3000' ? '' : `${window.location.protocol}//${window.location.hostname}:8080`;
+const api = async (path,opts={}) => {
+  try {
+    const r = await fetch(API+"/api/v1"+path,{headers:{"Content-Type":"application/json"},...opts});
+    if (r.ok) return r.json();
+    console.error("API error",r.status); return null;
+  } catch(e) { console.error("API fetch error",e); return null; }
+};
+const ft = s => { if (!s||s==="None") return "—"; try { return new Date(s).toLocaleString("vi-VN",{hour12:false}); } catch { return s; } };
+
+const SC = {
+  new:{bg:"#4b5563",label:"Mới"},deduplicated:{bg:"#4b5563",label:"Trùng lặp"},
+  suppressed:{bg:"#6b7280",label:"Không cảnh báo"},evidence_collecting:{bg:"#2563eb",label:"Đang thu thập",spin:true},
+  evidence_collected:{bg:"#1d4ed8",label:"Đã thu thập"},analyzing:{bg:"#7c3aed",label:"Đang phân tích",spin:true},
+  analysis_failed:{bg:"#dc2626",label:"Phân tích lỗi"},action_proposed:{bg:"#d97706",label:"Chờ duyệt"},
+  approved:{bg:"#16a34a",label:"Đã duyệt"},canceled:{bg:"#6b7280",label:"Đã hủy"},
+  executing:{bg:"#2563eb",label:"Đang xử lý",spin:true},executed:{bg:"#059669",label:"Đã xử lý"},
+  execution_failed:{bg:"#dc2626",label:"Xử lý lỗi"},resolved:{bg:"#059669",label:"Đã giải quyết"},
+  closed:{bg:"#4b5563",label:"Đã đóng"},manual_required:{bg:"#b45309",label:"Cần xử lý tay"},
+  monitoring:{bg:"#0284c7",label:"Đang theo dõi",spin:true},failed:{bg:"#dc2626",label:"Thất bại"},
+};
+const RiskC = {low:"#16a34a",medium:"#d97706",high:"#dc2626",critical:"#7f1d1d"};
+const SevC = {critical:"#dc2626",warning:"#d97706",info:"#3b82f6"};
+
+function Badge({bg,children}){ return <span style={{display:"inline-block",padding:"2px 8px",borderRadius:4,fontSize:10,fontWeight:700,background:bg,color:"#fff",whiteSpace:"nowrap"}}>{children}</span>; }
+function StatusBadge({status}){ const s=SC[status]||{bg:"#4b5563",label:status}; return <Badge bg={s.bg}>{s.spin&&<span style={{display:"inline-block",width:8,height:8,border:"2px solid rgba(255,255,255,.3)",borderTopColor:"#fff",borderRadius:"50%",animation:"spin .8s linear infinite",marginRight:4,verticalAlign:"middle"}}/>}{s.label}</Badge>; }
+function SevBadge({sev}){ return <Badge bg={SevC[sev]||"#4b5563"}>{sev}</Badge>; }
+function ConfBar({v}){ if(!v) return <span style={{color:"#4b5563"}}>—</span>; const p=Math.round(v*100); const c=p>=80?"#22c55e":p>=50?"#d97706":"#ef4444"; return <div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:50,height:6,background:"#1e2640",borderRadius:3,overflow:"hidden"}}><div style={{width:`${p}%`,height:"100%",background:c,borderRadius:3}}/></div><span style={{fontSize:11,color:c,fontWeight:600}}>{p}%</span></div>; }
+
+// === URL routing ===
+function getRoute() {
+  const path = window.location.pathname;
+  const m = path.match(/^\/incidents\/([a-f0-9-]+)/);
+  if (m) return { page: "detail", id: m[1] };
+  if (path === "/incidents") return { page: "incidents" };
+  if (path === "/agents") return { page: "agents" };
+  if (path === "/audit") return { page: "audit" };
+  return { page: "dashboard" };
+}
+
+function navigate(page, id) {
+  const url = page === "detail" ? `/incidents/${id}` : page === "dashboard" ? "/" : `/${page}`;
+  window.history.pushState({}, "", url);
+  window.dispatchEvent(new Event("popstate"));
+}
+
+// === DETAIL PAGE ===
+function DetailPage({incidentId}) {
+  const [data,setData] = useState(null);
+  const [loading,setLoading] = useState(true);
+  const [tab,setTab] = useState("rca");
+  const [approving,setApproving] = useState(null);
+  const [suppressing,setSuppressing] = useState(false);
+  const [monitorMin,setMonitorMin] = useState(15);
+  const [checkedCmds,setCheckedCmds] = useState({});
+  const [llmAction,setLlmAction] = useState(false);
+
+  const loadDetail = useCallback(async()=>{
+    const d = await api("/incidents/"+incidentId);
+    if(d) { setData(d); setLoading(false); }
+    else setLoading(false);
+  },[incidentId]);
+
+  useEffect(()=>{ loadDetail(); const t=setInterval(loadDetail,8000); return ()=>clearInterval(t); },[loadDetail]);
+
+  const handleApprove = async (optId,decision) => {
+    setApproving(optId);
+    const sel = checkedCmds[optId] ? Array.from(checkedCmds[optId]).sort() : null;
+    await api("/approvals",{method:"POST",body:JSON.stringify({action_proposal_id:optId,decision,decided_by:"operator",selected_commands:decision==="approved"?sel:null})});
+    await loadDetail(); setApproving(null);
+  };
+  const handleSuppress = async()=>{ if(!confirm("Đánh dấu KHÔNG CẦN CẢNH BÁO?")) return; setSuppressing(true); await api("/incidents/"+incidentId+"/suppress",{method:"POST"}); await loadDetail(); setSuppressing(false); };
+  const handleUnsuppress = async()=>{ setSuppressing(true); await api("/incidents/"+incidentId+"/unsuppress",{method:"POST"}); await loadDetail(); setSuppressing(false); };
+  const handleMonitor = async()=>{ setSuppressing(true); await api("/incidents/"+incidentId+"/monitor",{method:"POST",body:JSON.stringify({duration_minutes:monitorMin})}); await loadDetail(); setSuppressing(false); };
+  const handleSkipLLM = async()=>{ setLlmAction(true); await api("/incidents/"+incidentId+"/skip-llm",{method:"POST"}); await loadDetail(); setLlmAction(false); };
+  const handleQueryLLM = async()=>{ setLlmAction(true); await api("/incidents/"+incidentId+"/query-llm",{method:"POST"}); const poll=setInterval(async()=>{ const d=await api("/incidents/"+incidentId); if(d&&d.incident.status!=="analyzing"){clearInterval(poll);setData(d);setLlmAction(false);} },3000); setTimeout(()=>{clearInterval(poll);setLlmAction(false);loadDetail();},300000); };
+  const toggleCmd = (id,i)=>{ setCheckedCmds(p=>{const s=new Set(p[id]||[]);s.has(i)?s.delete(i):s.add(i);return{...p,[id]:s}}); };
+  const selectAll = (id,cmds)=>{ setCheckedCmds(p=>({...p,[id]:new Set(cmds.map((_,i)=>i))})); };
+
+  if(loading) return <div style={{textAlign:"center",padding:60,color:"#64748b"}}><span style={{display:"inline-block",width:24,height:24,border:"3px solid #1e293b",borderTopColor:"#3b82f6",borderRadius:"50%",animation:"spin .8s linear infinite"}}/></div>;
+  if(!data) return <div style={{textAlign:"center",padding:60,color:"#ef4444"}}>Không tìm thấy incident</div>;
+  const inc = data.incident;
+
+  const tabs = [
+    {id:"rca",label:"🔍 Root Cause"},
+    {id:"prompt",label:"🤖 Prompt LLM"},
+    {id:"llm_resp",label:"📩 LLM Response"},
+    {id:"evidence",label:"📋 Bằng chứng ("+((data.evidence||[]).length)+")"},
+    {id:"actions",label:"⚡ Phương án ("+((data.action_proposals||[]).length)+")"},
+    {id:"exec",label:"🖥 Thực thi ("+((data.execution_results||[]).length)+")"},
+    {id:"timeline",label:"📅 Timeline"},
+  ];
+
+  return <div className="fade-in">
+    <button onClick={()=>navigate("dashboard")} style={{background:"none",border:"none",color:"#60a5fa",cursor:"pointer",marginBottom:16,fontSize:13,padding:0}}>← Dashboard</button>
+
+    {/* Header */}
+    <div style={{background:"linear-gradient(135deg,#141929,#1a2038)",border:"1px solid #252d45",borderRadius:10,padding:20,marginBottom:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8,marginBottom:12}}>
+        <div>
+          <div style={{fontSize:10,color:"#4b5563",fontFamily:"monospace",marginBottom:4}}>{inc.incident_number}</div>
+          <h2 style={{fontSize:18,fontWeight:700,color:"#f1f5f9",margin:0}}>{inc.title}</h2>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <StatusBadge status={inc.status}/><SevBadge sev={inc.severity}/>
+          {(inc.status==="new"||inc.status==="evidence_collecting"||inc.status==="evidence_collected") && !inc.root_cause_summary && <button onClick={handleSkipLLM} disabled={llmAction} style={{padding:"4px 10px",fontSize:11,fontWeight:600,background:"#7c3aed",color:"#fff",border:"none",borderRadius:4,cursor:"pointer"}}>{llmAction?"...":"⏸ Bỏ qua LLM"}</button>}
+          {(inc.status==="evidence_collected"||inc.status==="analysis_failed"||inc.status==="manual_required") && <button onClick={handleQueryLLM} disabled={llmAction} style={{padding:"4px 10px",fontSize:11,fontWeight:600,background:llmAction?"#4b5563":"#2563eb",color:"#fff",border:"none",borderRadius:4,cursor:"pointer"}}>{llmAction?"🤖 Đang phân tích...":"🤖 Query LLM"}</button>}
+          {inc.status==="suppressed" && <button onClick={handleUnsuppress} disabled={suppressing} style={{padding:"4px 10px",fontSize:11,fontWeight:600,background:"#dc2626",color:"#fff",border:"none",borderRadius:4,cursor:"pointer"}}>{suppressing?"...":"🔔 Bật cảnh báo lại"}</button>}
+          {inc.status!=="suppressed"&&inc.status!=="closed"&&inc.status!=="monitoring"&&inc.root_cause_summary && <button onClick={handleSuppress} disabled={suppressing} style={{padding:"4px 10px",fontSize:11,fontWeight:600,background:"transparent",color:"#64748b",border:"1px solid #374151",borderRadius:4,cursor:"pointer"}}>{suppressing?"...":"🔕 Không cảnh báo"}</button>}
+        </div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,fontSize:12}}>
+        <div><span style={{color:"#4b5563"}}>Instance:</span> <span style={{color:"#94a3b8",fontFamily:"monospace"}}>{inc.instance}</span></div>
+        <div><span style={{color:"#4b5563"}}>Resource:</span> <span style={{color:"#94a3b8"}}>{inc.resource_type||"—"}</span></div>
+        <div><span style={{color:"#4b5563"}}>Nguồn RCA:</span> <span style={{color:inc.knowledge_source==="llm"?"#a78bfa":"#94a3b8"}}>{inc.knowledge_source||"—"}</span></div>
+        <div><span style={{color:"#4b5563"}}>Confidence:</span> <ConfBar v={inc.llm_confidence}/></div>
+      </div>
+    </div>
+
+    {/* RCA Summary or LLM skipped banner */}
+    {inc.status==="evidence_collected" && !inc.root_cause_summary && <div style={{background:"#1e1b4b",border:"1px solid #4338ca",borderLeft:"3px solid #7c3aed",borderRadius:6,padding:16,marginBottom:16}}>
+      <div style={{fontSize:12,color:"#a78bfa",fontWeight:700,marginBottom:6}}>⏸ LLM CHƯA ĐƯỢC GỌI</div>
+      <div style={{color:"#c4b5fd",fontSize:13}}>Dữ liệu đã thu thập ({(data.evidence||[]).length} bằng chứng). Nhấn <strong>"🤖 Query LLM"</strong> để phân tích root cause.</div>
+    </div>}
+    {inc.root_cause_summary && <div style={{background:"#14192e",border:"1px solid #252d45",borderLeft:"3px solid #f59e0b",borderRadius:6,padding:16,marginBottom:16}}>
+      <div style={{fontSize:12,color:"#f59e0b",fontWeight:700,marginBottom:6}}>ROOT CAUSE SUMMARY</div>
+      <div style={{color:"#e2e8f0",fontSize:14,lineHeight:1.6}}>{inc.root_cause_summary}</div>
+    </div>}
+
+    {/* Tabs */}
+    <div style={{display:"flex",gap:0,borderBottom:"1px solid #252d45",marginBottom:16,overflow:"auto"}}>
+      {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 16px",fontSize:12,fontWeight:tab===t.id?700:400,color:tab===t.id?"#60a5fa":"#4b5563",background:"transparent",border:"none",borderBottom:tab===t.id?"2px solid #60a5fa":"2px solid transparent",cursor:"pointer",whiteSpace:"nowrap"}}>{t.label}</button>)}
+    </div>
+
+    {/* RCA Tab */}
+    {tab==="rca" && <div className="fade-in">
+      {data.llm_analysis ? <div style={{background:"#141929",border:"1px solid #252d45",borderRadius:8,padding:16}}>
+        <div style={{fontSize:13,color:"#e2e8f0",lineHeight:1.6}}>{data.llm_analysis.summary}</div>
+        {data.llm_analysis.root_causes?.length>0 && <div style={{marginTop:12}}>
+          {data.llm_analysis.root_causes.map((rc,i)=><div key={i} style={{padding:"8px 0",borderBottom:"1px solid #1e2640"}}>
+            <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:"#e2e8f0",fontWeight:500}}>{rc.name}</span><span style={{color:"#f59e0b"}}>{Math.round((rc.confidence||0)*100)}%</span></div>
+            <div style={{color:"#94a3b8",fontSize:11,marginTop:4}}>{rc.why}</div>
+          </div>)}
+        </div>}
+      </div> : <div style={{padding:40,textAlign:"center",color:"#4b5563"}}>Chưa có phân tích</div>}
+    </div>}
+
+    {/* Prompt Tab */}
+    {tab==="prompt" && <div className="fade-in">
+      {inc.llm_prompt_text ? <div style={{background:"#141929",border:"1px solid #252d45",borderRadius:8,overflow:"hidden"}}>
+        <div style={{padding:"12px 16px",borderBottom:"1px solid #252d45",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:12,fontWeight:700,color:"#a78bfa"}}>🤖 PROMPT ({inc.llm_prompt_text.length.toLocaleString()} ký tự)</span>
+          <button onClick={()=>{navigator.clipboard.writeText(inc.llm_prompt_text)}} style={{fontSize:11,padding:"4px 10px",background:"#252d45",color:"#94a3b8",border:"none",borderRadius:4,cursor:"pointer"}}>📋 Copy</button>
+        </div>
+        <pre style={{margin:0,padding:16,fontSize:11,color:"#c9d1d9",background:"#0a0e1a",overflow:"auto",maxHeight:"70vh",fontFamily:"monospace",lineHeight:1.5}}>{inc.llm_prompt_text}</pre>
+      </div> : <div style={{padding:40,textAlign:"center",color:"#4b5563"}}>Chưa có prompt</div>}
+    </div>}
+
+    {/* LLM Response Tab */}
+    {tab==="llm_resp" && <div className="fade-in">
+      {inc.llm_raw_response ? (()=>{
+        let p=null; try{p=JSON.parse(inc.llm_raw_response)}catch{}
+        return p ? <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={{background:"#141929",border:"1px solid #252d45",borderRadius:8,padding:16}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#22c55e",marginBottom:6}}>📩 LLM RESPONSE</div>
+            <div style={{color:"#e2e8f0",fontSize:13,lineHeight:1.6,marginBottom:8}}>{p.summary||p.operator_message_vi||"—"}</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,fontSize:12}}>
+              <div><span style={{color:"#4b5563"}}>Confidence:</span> <span style={{color:"#f59e0b",fontWeight:700}}>{p.confidence}</span></div>
+              <div><span style={{color:"#4b5563"}}>Impact:</span> <span style={{color:"#94a3b8"}}>{p.impact||"—"}</span></div>
+              <div><span style={{color:"#4b5563"}}>RCA Level:</span> <span style={{color:"#94a3b8"}}>{p.rca_level||"—"}</span></div>
+            </div>
+          </div>
+          <div style={{background:"#141929",border:"1px solid #252d45",borderRadius:8,padding:16}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#f59e0b",marginBottom:8}}>ROOT CAUSE CHAIN</div>
+            <div style={{fontSize:12,lineHeight:1.8}}>
+              <div><span style={{color:"#4b5563"}}>Symptom:</span> <span style={{color:"#e2e8f0"}}>{p.symptom}</span></div>
+              <div><span style={{color:"#4b5563"}}>Immediate cause:</span> <span style={{color:"#e2e8f0"}}>{p.immediate_cause}</span></div>
+              <div><span style={{color:"#4b5563"}}>Root cause:</span> <span style={{color:"#fbbf24",fontWeight:600}}>{p.root_cause_hypothesis}</span></div>
+            </div>
+          </div>
+          {p.remediation_options?.length>0 && <div style={{background:"#141929",border:"1px solid #252d45",borderRadius:8,padding:16}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#22c55e",marginBottom:8}}>REMEDIATION OPTIONS ({p.remediation_options.length})</div>
+            {p.remediation_options.map((opt,i)=><div key={i} style={{padding:"10px 0",borderBottom:i<p.remediation_options.length-1?"1px solid #1e2640":"none"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                <span style={{fontSize:11,fontWeight:800,color:"#4b5563"}}>#{opt.priority||i+1}</span>
+                <span style={{color:"#e2e8f0",fontWeight:500}}>{opt.title}</span>
+                <Badge bg={RiskC[opt.risk_level]||"#6b7280"}>{opt.risk_level}</Badge>
+              </div>
+              <div style={{color:"#94a3b8",fontSize:11}}>{opt.description}</div>
+              {opt.commands?.length>0 && <pre style={{margin:"4px 0",padding:6,fontSize:10,background:"#0a0e1a",borderRadius:4,color:"#67e8f9",fontFamily:"monospace"}}>{opt.commands.join("\n")}</pre>}
+              {opt.expected_effect && <div style={{fontSize:11,color:"#86efac",marginTop:4}}>→ {opt.expected_effect}</div>}
+            </div>)}
+          </div>}
+          {p.operator_message_vi && <div style={{background:"#14192e",border:"1px solid #252d45",borderLeft:"3px solid #22c55e",borderRadius:6,padding:12}}>
+            <div style={{fontSize:11,color:"#22c55e",fontWeight:600,marginBottom:4}}>TIN NHẮN CHO OPERATOR</div>
+            <div style={{color:"#e2e8f0",fontSize:13}}>{p.operator_message_vi}</div>
+          </div>}
+          <details style={{background:"#141929",border:"1px solid #252d45",borderRadius:8}}>
+            <summary style={{padding:"10px 16px",fontSize:12,color:"#4b5563",cursor:"pointer"}}>Xem JSON gốc</summary>
+            <pre style={{margin:0,padding:16,fontSize:10,color:"#94a3b8",background:"#0a0e1a",overflow:"auto",maxHeight:400,fontFamily:"monospace",borderTop:"1px solid #252d45"}}>{JSON.stringify(p,null,2)}</pre>
+          </details>
+        </div> : <pre style={{padding:16,fontSize:11,color:"#f87171",background:"#0a0e1a",borderRadius:8,overflow:"auto",maxHeight:"70vh"}}>{inc.llm_raw_response}</pre>
+      })() : <div style={{padding:40,textAlign:"center",color:"#4b5563"}}>Chưa có response từ LLM</div>}
+    </div>}
+
+    {/* Evidence Tab */}
+    {tab==="evidence" && <div className="fade-in" style={{display:"flex",flexDirection:"column",gap:8}}>
+      {(data.evidence||[]).length===0 ? <div style={{padding:40,textAlign:"center",color:"#4b5563"}}>Chưa có bằng chứng</div> :
+      (data.evidence||[]).map((e,i)=><div key={i} style={{background:e.is_key_evidence?"#14192e":"#141929",border:"1px solid "+(e.is_key_evidence?"#f59e0b":"#252d45"),borderRadius:8,padding:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            {e.is_key_evidence && <span style={{fontSize:10,padding:"1px 6px",background:"#f59e0b",color:"#000",borderRadius:3,fontWeight:700}}>KEY</span>}
+            <span style={{fontWeight:600,color:"#e2e8f0",fontSize:13,fontFamily:"monospace"}}>{e.command_id||e.metric_name||"—"}</span>
+            <span style={{fontSize:10,color:"#4b5563"}}>{e.evidence_type}</span>
+          </div>
+          <div style={{display:"flex",gap:8,fontSize:10,color:"#4b5563"}}>
+            {e.exit_code!==null && <span>exit={e.exit_code}</span>}
+            {e.duration_ms && <span>{e.duration_ms}ms</span>}
+          </div>
+        </div>
+        {e.command_text && <div style={{fontSize:10,color:"#64748b",fontFamily:"monospace",marginBottom:4}}>{e.command_text}</div>}
+        {e.raw_text && <pre style={{margin:0,padding:8,fontSize:10,background:"#0a0e1a",borderRadius:4,color:"#94a3b8",fontFamily:"monospace",maxHeight:200,overflow:"auto"}}>{e.raw_text.slice(0,3000)}{e.raw_text.length>3000?"...":"" }</pre>}
+        {e.metric_name && <div style={{fontSize:12,color:"#67e8f9"}}>{e.metric_name} = {e.metric_value}</div>}
+      </div>)}
+    </div>}
+
+    {/* Actions Tab */}
+    {tab==="actions" && <div className="fade-in" style={{display:"flex",flexDirection:"column",gap:12}}>
+      {(data.action_proposals||[]).length===0 && <div style={{padding:40,textAlign:"center",color:"#4b5563"}}>Chưa có phương án</div>}
+      {(data.action_proposals||[]).map(opt=>{
+        const cmds=opt.commands||[]; const checked=checkedCmds[opt.id]||new Set();
+        return <div key={opt.id} style={{background:"#141929",border:"1px solid #252d45",borderRadius:8,padding:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+          <div>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+              <span style={{fontSize:12,fontWeight:800,color:"#4b5563"}}>#{opt.priority}</span>
+              <span style={{fontWeight:600,color:"#e2e8f0",fontSize:14}}>{opt.title}</span>
+              <Badge bg={RiskC[opt.risk_level]||"#6b7280"}>{opt.risk_level}</Badge>
+            </div>
+            <div style={{color:"#94a3b8",fontSize:12}}>{opt.description}</div>
+          </div>
+          <StatusBadge status={opt.status}/>
+        </div>
+        {cmds.length>0 && <div style={{marginTop:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+            <span style={{fontSize:10,color:"#4b5563",fontWeight:600}}>CÁC BƯỚC THỰC HIỆN</span>
+            {opt.status==="pending" && <button onClick={()=>selectAll(opt.id,cmds)} style={{fontSize:10,color:"#60a5fa",background:"none",border:"none",cursor:"pointer"}}>Chọn tất cả</button>}
+          </div>
+          {cmds.map((cmd,ci)=><label key={ci} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"6px 10px",background:checked.has(ci)?"#1a2240":"#0f1322",border:"1px solid "+(checked.has(ci)?"#3b82f6":"#1e2640"),borderRadius:4,marginBottom:4,cursor:opt.status==="pending"?"pointer":"default"}}>
+            {opt.status==="pending" && <input type="checkbox" checked={checked.has(ci)} onChange={()=>toggleCmd(opt.id,ci)} style={{marginTop:2,accentColor:"#3b82f6"}}/>}
+            {opt.status!=="pending" && <span style={{color:"#22c55e",marginTop:1}}>✓</span>}
+            <pre style={{margin:0,fontSize:11,color:checked.has(ci)?"#67e8f9":"#94a3b8",fontFamily:"monospace",flex:1}}>{cmd}</pre>
+          </label>)}
+        </div>}
+        {opt.expected_effect && <div style={{marginTop:8,fontSize:12}}><span style={{color:"#4b5563"}}>Kỳ vọng: </span><span style={{color:"#86efac"}}>{opt.expected_effect}</span></div>}
+        {opt.warnings?.length>0 && <div style={{marginTop:6,fontSize:11,color:"#fbbf24"}}>⚠ {opt.warnings.join("; ")}</div>}
+        {opt.rollback_commands?.length>0 && <div style={{marginTop:8}}><div style={{fontSize:10,color:"#4b5563",marginBottom:3,fontWeight:600}}>ROLLBACK</div><pre style={{margin:0,padding:6,fontSize:10,background:"#0f1322",borderRadius:4,color:"#64748b",fontFamily:"monospace"}}>{opt.rollback_commands.join("\n")}</pre></div>}
+        {opt.status==="pending" && <div style={{marginTop:14,display:"flex",gap:8}}>
+          <button onClick={()=>handleApprove(opt.id,"approved")} disabled={approving===opt.id||(cmds.length>0&&checked.size===0)} style={{padding:"7px 20px",fontSize:12,fontWeight:600,background:(cmds.length>0&&checked.size===0)?"#374151":"#16a34a",color:"#fff",border:"none",borderRadius:6,cursor:(cmds.length>0&&checked.size===0)?"not-allowed":"pointer"}}>{approving===opt.id?"...":("✓ Duyệt"+(checked.size>0?" ("+checked.size+" bước)":""))}</button>
+          <button onClick={()=>handleApprove(opt.id,"canceled")} disabled={approving===opt.id} style={{padding:"7px 20px",fontSize:12,fontWeight:600,background:"transparent",color:"#94a3b8",border:"1px solid #374151",borderRadius:6,cursor:"pointer"}}>✕ Hủy</button>
+        </div>}
+      </div>;})}
+      {inc.status==="action_proposed" && <div style={{background:"#141929",border:"1px solid #0284c7",borderRadius:8,padding:16}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}><span style={{fontWeight:600,color:"#e2e8f0",fontSize:14}}>👁 Theo dõi thêm</span><Badge bg="#0284c7">monitor</Badge></div>
+        <div style={{color:"#94a3b8",fontSize:12,marginBottom:10}}>Tạm dedup alert trong thời gian theo dõi.</div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <span style={{fontSize:12,color:"#64748b"}}>Thời gian:</span>
+          <input type="number" value={monitorMin} onChange={e=>setMonitorMin(Math.max(1,parseInt(e.target.value)||15))} style={{width:60,padding:"4px 8px",fontSize:12,background:"#0f1322",color:"#e2e8f0",border:"1px solid #252d45",borderRadius:4,textAlign:"center"}}/>
+          <span style={{fontSize:12,color:"#64748b"}}>phút</span>
+          <button onClick={handleMonitor} disabled={suppressing} style={{padding:"7px 16px",fontSize:12,fontWeight:600,background:"#0284c7",color:"#fff",border:"none",borderRadius:6,cursor:"pointer",marginLeft:8}}>{suppressing?"...":"👁 Theo dõi"}</button>
+        </div>
+      </div>}
+    </div>}
+
+    {/* Timeline Tab */}
+    {tab==="exec" && <div className="fade-in">
+      {(data.execution_results||[]).length===0 ? <div style={{padding:40,textAlign:"center",color:"#4b5563"}}>Chưa có kết quả thực thi</div> :
+      (data.execution_results||[]).map((x,i)=><div key={i} style={{background:"#141929",border:"1px solid #252d45",borderRadius:8,padding:12,marginBottom:8}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+          <span style={{fontWeight:600,color:"#e2e8f0"}}>Bước {x.step_no}: {x.step_name}</span>
+          <Badge bg={x.status==="success"?"#16a34a":"#dc2626"}>{x.status}</Badge>
+        </div>
+        <pre style={{margin:0,padding:6,fontSize:10,background:"#0a0e1a",borderRadius:4,color:"#67e8f9",fontFamily:"monospace"}}>{x.command}</pre>
+        {x.stdout && <pre style={{margin:"4px 0 0",padding:6,fontSize:10,background:"#0a0e1a",borderRadius:4,color:"#94a3b8",maxHeight:150,overflow:"auto"}}>{x.stdout}</pre>}
+        {x.stderr && <pre style={{margin:"4px 0 0",padding:6,fontSize:10,background:"#0a0e1a",borderRadius:4,color:"#f87171"}}>{x.stderr}</pre>}
+      </div>)}
+    </div>}
+
+    {tab==="timeline" && <div className="fade-in">
+      {(data.events||[]).length===0 ? <div style={{padding:40,textAlign:"center",color:"#4b5563"}}>Chưa có sự kiện</div> :
+      <div style={{borderLeft:"2px solid #252d45",marginLeft:12,paddingLeft:20}}>
+        {data.events.map((e,i)=><div key={i} style={{marginBottom:16,position:"relative"}}>
+          <div style={{position:"absolute",left:-27,top:4,width:12,height:12,borderRadius:"50%",background:"#252d45",border:"2px solid #3b82f6"}}/>
+          <div style={{fontSize:11,color:"#4b5563"}}>{ft(e.created_at)}</div>
+          <div style={{fontSize:13,color:"#e2e8f0",fontWeight:500}}>{e.event_type}</div>
+          {e.event_data && <div style={{fontSize:11,color:"#64748b",marginTop:2}}>{JSON.stringify(e.event_data)}</div>}
+        </div>)}
+      </div>}
+    </div>}
+  </div>;
+}
+
+// === DASHBOARD ===
+function DashboardPage({stats,incidents,onDelete}) {
+  return <div className="fade-in">
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginBottom:24}}>
+      {[{l:"Tổng incidents",v:stats.total,c:"#3b82f6"},{l:"Đang hoạt động",v:stats.active,c:"#f59e0b"},{l:"Chờ duyệt",v:stats.pending_approvals,c:"#ef4444"}].map((s,i)=>
+        <div key={i} style={{background:"#141929",border:"1px solid #252d45",borderRadius:10,padding:20}}>
+          <div style={{fontSize:12,color:"#4b5563",marginBottom:4}}>{s.l}</div>
+          <div style={{fontSize:28,fontWeight:700,color:s.c}}>{s.v||0}</div>
+        </div>)}
+    </div>
+    <div style={{background:"#141929",border:"1px solid #252d45",borderRadius:10,overflow:"hidden"}}>
+      <div style={{padding:"12px 20px",borderBottom:"1px solid #252d45",display:"flex",justifyContent:"space-between"}}>
+        <span style={{fontWeight:600,color:"#e2e8f0"}}>Incidents gần đây</span>
+        <button onClick={()=>navigate("incidents")} style={{background:"none",border:"none",color:"#60a5fa",cursor:"pointer",fontSize:12}}>Xem tất cả →</button>
+      </div>
+      {incidents.slice(0,10).map(inc=><div key={inc.id} onClick={()=>navigate("detail",inc.id)} style={{display:"grid",gridTemplateColumns:"1fr 130px 110px 80px 70px 110px 30px",alignItems:"center",padding:"10px 20px",borderBottom:"1px solid #1e2640",cursor:"pointer",fontSize:13}} onMouseEnter={e=>e.currentTarget.style.background="#1a2240"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+        <div><div style={{color:"#e2e8f0",fontWeight:500}}>{inc.alert_type}</div><div style={{color:"#4b5563",fontSize:11,fontFamily:"monospace"}}>{inc.instance}</div></div>
+        <div style={{fontFamily:"monospace",fontSize:10,color:"#64748b"}}>{inc.incident_number}</div>
+        <div><StatusBadge status={inc.status}/></div>
+        <div><SevBadge sev={inc.severity}/></div>
+        <div><ConfBar v={inc.llm_confidence}/></div>
+        <div style={{textAlign:"right",fontSize:11,color:"#4b5563"}}>{ft(inc.created_at)}</div>
+        <button onClick={e=>{e.stopPropagation();onDelete(inc.id,inc.title)}} style={{background:"none",border:"none",color:"#4b5563",cursor:"pointer",fontSize:14}} onMouseEnter={e=>e.currentTarget.style.color="#ef4444"} onMouseLeave={e=>e.currentTarget.style.color="#4b5563"}>✕</button>
+      </div>)}
+    </div>
+  </div>;
+}
+
+// === AGENTS ===
+function AgentsPage() {
+  const [agents,setAgents] = useState([]);
+  useEffect(()=>{ (async()=>{ setAgents(await api("/agents")||[]); })(); },[]);
+  return <div className="fade-in">
+    <h2 style={{fontSize:18,fontWeight:700,color:"#f1f5f9",marginBottom:16}}>Registered Agents</h2>
+    {agents.length===0 ? <div style={{padding:40,textAlign:"center",color:"#4b5563",background:"#141929",borderRadius:10,border:"1px solid #252d45"}}>Chưa có agent</div> :
+    agents.map((a,i)=><div key={i} style={{background:"#141929",border:"1px solid #252d45",borderRadius:10,padding:16,marginBottom:12}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+        <span style={{fontSize:18}}>🤖</span><span style={{fontWeight:700,color:"#e2e8f0"}}>{a.agent_id}</span>
+        <Badge bg={a.status==="active"?"#16a34a":"#ef4444"}>{a.status}</Badge>
+      </div>
+      <div style={{fontSize:12,color:"#64748b"}}>URL: <span style={{color:"#67e8f9",fontFamily:"monospace"}}>{a.base_url}</span></div>
+      <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:6}}>{(a.supported_alerts||[]).map((al,j)=><span key={j} style={{fontSize:10,padding:"2px 6px",background:"#1e2640",borderRadius:3,color:"#64748b"}}>{al}</span>)}</div>
+    </div>)}
+  </div>;
+}
+
+// === AUDIT ===
+function AuditPage() {
+  const [items,setItems] = useState([]);
+  useEffect(()=>{ (async()=>{ setItems(await api("/audit")||[]); })(); },[]);
+  return <div className="fade-in">
+    <h2 style={{fontSize:18,fontWeight:700,color:"#f1f5f9",marginBottom:16}}>Audit Log</h2>
+    <div style={{background:"#141929",border:"1px solid #252d45",borderRadius:10,overflow:"hidden"}}>
+      {items.map((a,i)=><div key={i} style={{padding:"8px 16px",borderBottom:"1px solid #1e2640",fontSize:12,display:"flex",justifyContent:"space-between"}}>
+        <div><span style={{color:"#3b82f6",fontWeight:600}}>{a.event_type}</span> <span style={{color:"#4b5563"}}>{a.entity_type}:{a.entity_id?.slice(0,8)}</span></div>
+        <span style={{color:"#4b5563",fontSize:11}}>{ft(a.created_at)}</span>
+      </div>)}
+    </div>
+  </div>;
+}
+
+// === INCIDENTS LIST ===
+function IncidentsPage({incidents,onDelete}) {
+  return <div className="fade-in">
+    <h2 style={{fontSize:18,fontWeight:700,color:"#f1f5f9",marginBottom:16}}>All Incidents</h2>
+    <div style={{background:"#141929",border:"1px solid #252d45",borderRadius:10,overflow:"hidden"}}>
+      {incidents.map(inc=><div key={inc.id} onClick={()=>navigate("detail",inc.id)} style={{display:"grid",gridTemplateColumns:"1fr 140px 110px 80px 70px 110px 30px",alignItems:"center",padding:"10px 20px",borderBottom:"1px solid #1e2640",cursor:"pointer",fontSize:13}} onMouseEnter={e=>e.currentTarget.style.background="#1a2240"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+        <div><div style={{color:"#e2e8f0",fontWeight:500}}>{inc.alert_type}</div><div style={{color:"#4b5563",fontSize:11,fontFamily:"monospace"}}>{inc.instance}</div></div>
+        <div style={{fontFamily:"monospace",fontSize:10,color:"#64748b"}}>{inc.incident_number}</div>
+        <div><StatusBadge status={inc.status}/></div>
+        <div><SevBadge sev={inc.severity}/></div>
+        <div><ConfBar v={inc.llm_confidence}/></div>
+        <div style={{textAlign:"right",fontSize:11,color:"#4b5563"}}>{ft(inc.created_at)}</div>
+        <button onClick={e=>{e.stopPropagation();onDelete(inc.id,inc.title)}} style={{background:"none",border:"none",color:"#4b5563",cursor:"pointer",fontSize:14}} onMouseEnter={e=>e.currentTarget.style.color="#ef4444"} onMouseLeave={e=>e.currentTarget.style.color="#4b5563"}>✕</button>
+      </div>)}
+    </div>
+  </div>;
+}
+
+// === APP ===
+function App() {
+  const [stats,setStats] = useState({total:0,active:0,pending_approvals:0});
+  const [incidents,setIncidents] = useState([]);
+  const [route,setRoute] = useState(getRoute());
+  const [connected,setConnected] = useState(false);
+  const [sideOpen,setSideOpen] = useState(true);
+
+  const refresh = useCallback(async()=>{
+    const [s,inc] = await Promise.all([api("/incidents/stats"),api("/incidents")]);
+    if(s){setStats(s);setConnected(true);} if(inc) setIncidents(inc);
+  },[]);
+
+  useEffect(()=>{ refresh(); const t=setInterval(refresh,10000); return ()=>clearInterval(t); },[refresh]);
+  useEffect(()=>{ const h=()=>setRoute(getRoute()); window.addEventListener("popstate",h); return()=>window.removeEventListener("popstate",h); },[]);
+  useEffect(()=>{
+    let es; try{ es=new EventSource(API+"/api/v1/events/stream"); es.onmessage=()=>refresh(); es.onerror=()=>setConnected(false); es.onopen=()=>setConnected(true); }catch{}
+    return()=>{if(es)es.close()};
+  },[refresh]);
+
+  const handleDelete = async(id,title)=>{ if(!confirm("Xóa incident?\n"+title)) return; await api("/incidents/"+id,{method:"DELETE"}); refresh(); };
+
+  const menu = [{id:"dashboard",label:"Dashboard",icon:"📊"},{id:"incidents",label:"Incidents",icon:"🔔"},{id:"agents",label:"Agents",icon:"🤖"},{id:"audit",label:"Audit",icon:"📋"}];
+
+  return <div style={{display:"flex",minHeight:"100vh"}}>
+    <aside style={{width:sideOpen?200:56,background:"#0f1322",borderRight:"1px solid #1e2640",transition:"width .2s",display:"flex",flexDirection:"column",flexShrink:0}}>
+      <div style={{padding:16,display:"flex",alignItems:"center",gap:8,borderBottom:"1px solid #1e2640"}}>
+        <button onClick={()=>setSideOpen(!sideOpen)} style={{background:"none",border:"none",color:"#64748b",cursor:"pointer",fontSize:18}}>☰</button>
+        {sideOpen && <span style={{fontSize:13,fontWeight:700,color:"#e2e8f0"}}>AI Alert Platform</span>}
+      </div>
+      <nav style={{flex:1,padding:"8px 0"}}>{menu.map(m=><button key={m.id} onClick={()=>navigate(m.id)} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"10px 16px",background:route.page===m.id?"#1a2240":"transparent",border:"none",color:route.page===m.id?"#60a5fa":"#64748b",cursor:"pointer",fontSize:13,textAlign:"left"}}><span>{m.icon}</span>{sideOpen&&<span>{m.label}</span>}</button>)}</nav>
+      {sideOpen && <div style={{padding:16,borderTop:"1px solid #1e2640",fontSize:10,color:"#374151"}}><div>AI Alert Platform v1.0</div></div>}
+    </aside>
+    <div style={{flex:1,display:"flex",flexDirection:"column"}}>
+      <header style={{padding:"12px 24px",borderBottom:"1px solid #1e2640",display:"flex",justifyContent:"space-between",alignItems:"center",background:"#0f1322"}}>
+        <h1 style={{fontSize:14,fontWeight:600,color:"#64748b",margin:0}}>{route.page==="dashboard"?"Dashboard":route.page==="incidents"?"All Incidents":route.page==="detail"?"Incident Detail":route.page==="agents"?"Agents":"Audit"}</h1>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <button onClick={refresh} style={{background:"none",border:"none",color:"#4b5563",cursor:"pointer",fontSize:16}}>↻</button>
+          <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:"#4b5563"}}><div style={{width:7,height:7,borderRadius:"50%",background:connected?"#22c55e":"#ef4444"}}/><span>{connected?"Connected":"Disconnected"}</span></div>
+        </div>
+      </header>
+      <main style={{flex:1,padding:24,overflow:"auto"}}>
+        {route.page==="dashboard" && <DashboardPage stats={stats} incidents={incidents} onDelete={handleDelete}/>}
+        {route.page==="incidents" && <IncidentsPage incidents={incidents} onDelete={handleDelete}/>}
+        {route.page==="detail" && <DetailPage incidentId={route.id}/>}
+        {route.page==="agents" && <AgentsPage/>}
+        {route.page==="audit" && <AuditPage/>}
+      </main>
+    </div>
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

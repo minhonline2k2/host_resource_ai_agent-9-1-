@@ -1,13 +1,10 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
 *.egg-info/
 dist/
 build/
-eggs/
-*.egg
+.eggs/
 
 # Virtual env
 venv/
@@ -20,29 +17,23 @@ env/
 *.swp
 *.swo
 
+# Environment
+.env
+.env.local
+!deploy/docker/.env.*
+
 # OS
 .DS_Store
 Thumbs.db
 
-# Pytest
-.pytest_cache/
-
-# Byte-compiled
-*.pyc
-
-# Database
-*.db
-*.sqlite3
-
-# Docker volumes (local)
+# Docker
 mysql_data/
-prometheus_data/
 
-# Environment files with secrets
-.env
-.env.docker
-.env.local
-.env.production
+# Secrets
+*.pem
+*.key
+id_rsa
+id_rsa.pub
 
-# Misc
-{app/
+# Logs
+*.log

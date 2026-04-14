@@ -1,0 +1,94 @@
+version: "3.8"
+services:
+  db:
+    image: mysql:5.7
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --innodb-large-prefix=1
+      --innodb-file-format=Barracuda
+      --innodb-file-per-table=1
+      --innodb-default-row-format=dynamic
+    env_file:
+      - .env.infra
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass 123
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "123", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  orchestrator:
+    build:
+      context: ../../orchestrator
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env.orchestrator
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8080/api/v1/health\")'"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 15s
+    restart: unless-stopped
+
+  host-resource-agent:
+    build:
+      context: ../../agents/host-resource
+      dockerfile: Dockerfile
+    env_file:
+      - .env.agent
+    environment:
+      - TZ=UTC
+    volumes:
+      - /home/hungnv1/.ssh:/app/ssh_keys:ro
+    depends_on:
+      orchestrator: { condition: service_healthy }
+    restart: unless-stopped
+
+  supervisor-agent:
+    build:
+      context: ../../agents/supervisor
+      dockerfile: Dockerfile
+    env_file:
+      - .env.supervisor
+    environment:
+      - TZ=UTC
+    volumes:
+      - /home/devops/.ssh:/app/ssh_keys:ro
+    depends_on:
+      orchestrator: { condition: service_healthy }
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: ../../ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      orchestrator: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
